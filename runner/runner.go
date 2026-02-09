@@ -233,6 +233,106 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 	}
 }
 
+func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequestQueue *agent.LiveRequestQueue, cfg agent.RunConfig) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		resp, err := r.sessionService.Get(ctx, &session.GetRequest{
+			AppName:   r.appName,
+			UserID:    userID,
+			SessionID: sessionID,
+		})
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+
+		storedSession := resp.Session
+
+		rootAgent := r.rootAgent
+		// TODO: get last event message from session to find which agent to run next.
+		// otherwise fallback to root agent.
+		agentToRun := rootAgent
+
+		ctx = parentmap.ToContext(ctx, r.parents)
+		ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
+			StreamingMode: runconfig.StreamingModeBidi,
+		})
+		ctx = plugininternal.ToContext(ctx, r.pluginManager)
+
+		var artifacts agent.Artifacts
+		if r.artifactService != nil {
+			artifacts = &artifactinternal.Artifacts{
+				Service:   r.artifactService,
+				SessionID: storedSession.ID(),
+				AppName:   storedSession.AppName(),
+				UserID:    storedSession.UserID(),
+			}
+		}
+
+		var memoryImpl agent.Memory = nil
+		if r.memoryService != nil {
+			memoryImpl = &imemory.Memory{
+				Service:   r.memoryService,
+				SessionID: storedSession.ID(),
+				UserID:    storedSession.UserID(),
+				AppName:   storedSession.AppName(),
+			}
+		}
+
+		ctx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+			Artifacts:        artifacts,
+			Memory:           memoryImpl,
+			Session:          sessioninternal.NewMutableSession(r.sessionService, storedSession),
+			Agent:            agentToRun,
+			LiveRequestQueue: liveRequestQueue,
+			RunConfig:        &cfg,
+		})
+		// ctx, err = r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager)
+		// if err != nil {
+		// 	yield(nil, err)
+		// 	return
+		// }
+
+		// TODO: Check if should handle
+		// pluginManager.RunBeforeRunCallback
+		// pluginManager.RunOnUserMessageCallback
+		pluginManager := r.pluginManager
+
+		for event, err := range agentToRun.Run(ctx) {
+			if err != nil {
+				if !yield(event, err) {
+					return
+				}
+				continue
+			}
+
+			if pluginManager != nil {
+				modifiedEvent, err := pluginManager.RunOnEventCallback(ctx, event)
+				if err != nil {
+					if !yield(nil, err) {
+						return
+					}
+					continue
+				}
+				if modifiedEvent != nil {
+					event = modifiedEvent
+				}
+			}
+
+			// only commit non-partial event to a session service
+			if !event.LLMResponse.Partial {
+				if err := r.sessionService.AppendEvent(ctx, storedSession, event); err != nil {
+					yield(nil, fmt.Errorf("failed to add event to session: %w", err))
+					return
+				}
+			}
+
+			if !yield(event, nil) {
+				return
+			}
+		}
+	}
+}
+
 func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool, pluginManager *plugininternal.PluginManager) (agent.InvocationContext, error) {
 	if msg == nil {
 		return ctx, nil

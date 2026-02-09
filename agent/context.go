@@ -100,6 +100,8 @@ type InvocationContext interface {
 	// NOTE: This is a temporary solution and will be removed later. The proper solution
 	// we plan is to stop embedding go context in adk context types and split it.
 	WithContext(ctx context.Context) InvocationContext
+
+	LiveRequestQueue() *LiveRequestQueue
 }
 
 // ReadonlyContext provides read-only access to invocation context data.

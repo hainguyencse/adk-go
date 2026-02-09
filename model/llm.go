@@ -26,13 +26,15 @@ import (
 type LLM interface {
 	Name() string
 	GenerateContent(ctx context.Context, req *LLMRequest, stream bool) iter.Seq2[*LLMResponse, error]
+	Connect(ctx context.Context, req *LLMRequest) (*genai.Session, error)
 }
 
 // LLMRequest is the raw LLM request.
 type LLMRequest struct {
-	Model    string
-	Contents []*genai.Content
-	Config   *genai.GenerateContentConfig
+	Model             string
+	Contents          []*genai.Content
+	Config            *genai.GenerateContentConfig
+	LiveConnectConfig *genai.LiveConnectConfig
 
 	Tools map[string]any `json:"-"`
 }

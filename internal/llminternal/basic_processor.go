@@ -52,6 +52,10 @@ func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f
 
 		// TODO: missing features
 		//  populate LLMRequest LiveConnectConfig setting
+		req.LiveConnectConfig = clone(state.LiveConnectConfig)
+		if req.LiveConnectConfig == nil {
+			req.LiveConnectConfig = &genai.LiveConnectConfig{}
+		}
 	}
 }
 

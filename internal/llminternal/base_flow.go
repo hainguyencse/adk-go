@@ -309,7 +309,94 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 		// to help with slicing the billing reports on a per-agent basis.
 
 		// TODO: RunLive mode when invocation_context.run_config.support_cfc is true.
-		useStream := runconfig.FromContext(ctx).StreamingMode == runconfig.StreamingModeSSE
+		streamingMode := runconfig.FromContext(ctx).StreamingMode
+		useStream := streamingMode == runconfig.StreamingModeSSE
+
+		if streamingMode == runconfig.StreamingModeBidi {
+			session, err := f.Model.Connect(ctx, req)
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			defer session.Close()
+
+			liveRequestQueue := ctx.LiveRequestQueue()
+			if liveRequestQueue == nil {
+				return
+			}
+
+			// Channel to receive messages from session.Receive()
+			type receiveResult struct {
+				msg *genai.LiveServerMessage
+				err error
+			}
+			receiveChan := make(chan receiveResult)
+
+			// Start goroutine to receive messages from session
+			go func() {
+				defer close(receiveChan)
+				for {
+					msg, err := session.Receive()
+					select {
+					case <-ctx.Done():
+						return
+					case receiveChan <- receiveResult{msg: msg, err: err}:
+						if err != nil {
+							return
+						}
+					}
+				}
+			}()
+
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case result, ok := <-receiveChan:
+					if !ok {
+						return
+					}
+					if result.err != nil {
+						yield(nil, result.err)
+						return
+					}
+					if result.msg != nil {
+						resp := liveServerMessageToLLMResponse(result.msg)
+						if resp != nil {
+							if !yield(resp, nil) {
+								return
+							}
+						}
+					}
+				case liveReq, ok := <-liveRequestQueue.Chan():
+					if !ok {
+						return
+					}
+
+					if liveReq.Close {
+						return
+					}
+
+					if liveReq.Realtime != nil {
+						err := session.SendRealtimeInput(*liveReq.Realtime)
+						if err != nil {
+							yield(nil, err)
+							return
+						}
+					}
+
+					if liveReq.Content != nil {
+						err := session.SendClientContent(genai.LiveClientContentInput{
+							Turns: []*genai.Content{liveReq.Content},
+						})
+						if err != nil {
+							yield(nil, err)
+							return
+						}
+					}
+				}
+			}
+		}
 
 		for resp, err := range f.Model.GenerateContent(ctx, req, useStream) {
 			if err != nil {
@@ -353,6 +440,49 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 			}
 		}
 	}
+}
+
+// liveServerMessageToLLMResponse converts a genai.LiveServerMessage to model.LLMResponse.
+func liveServerMessageToLLMResponse(msg *genai.LiveServerMessage) *model.LLMResponse {
+	if msg == nil {
+		return nil
+	}
+
+	resp := &model.LLMResponse{}
+
+	if msg.ServerContent != nil {
+		if msg.ServerContent.ModelTurn != nil {
+			resp.Content = msg.ServerContent.ModelTurn
+		}
+		resp.TurnComplete = msg.ServerContent.TurnComplete
+		resp.Interrupted = msg.ServerContent.Interrupted
+	}
+
+	if msg.ToolCall != nil && len(msg.ToolCall.FunctionCalls) > 0 {
+		parts := make([]*genai.Part, 0, len(msg.ToolCall.FunctionCalls))
+		for _, fc := range msg.ToolCall.FunctionCalls {
+			parts = append(parts, &genai.Part{FunctionCall: fc})
+		}
+		resp.Content = &genai.Content{
+			Parts: parts,
+			Role:  genai.RoleModel,
+		}
+	}
+
+	if msg.UsageMetadata != nil {
+		resp.UsageMetadata = &genai.GenerateContentResponseUsageMetadata{
+			PromptTokenCount:     msg.UsageMetadata.PromptTokenCount,
+			CandidatesTokenCount: msg.UsageMetadata.ResponseTokenCount,
+			TotalTokenCount:      msg.UsageMetadata.TotalTokenCount,
+		}
+	}
+
+	// Skip if no meaningful content
+	if resp.Content == nil && !resp.TurnComplete && !resp.Interrupted {
+		return nil
+	}
+
+	return resp
 }
 
 func (f *Flow) runAfterModelCallbacks(ctx agent.InvocationContext, llmResp *model.LLMResponse, stateDelta map[string]any, llmErr error) (*model.LLMResponse, error) {
