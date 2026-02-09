@@ -411,7 +411,7 @@ func (a *llmAgent) runLive(ctx agent.InvocationContext) iter.Seq2[*session.Event
 	}
 
 	return func(yield func(*session.Event, error) bool) {
-		for ev, err := range f.Run(ctx) {
+		for ev, err := range f.RunLive(ctx) {
 			a.maybeSaveOutputToState(ev)
 			if !yield(ev, err) {
 				return

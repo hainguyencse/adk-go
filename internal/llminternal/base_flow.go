@@ -120,6 +120,210 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 	}
 }
 
+func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		for {
+			// ========== Setup Request ==========
+			if f.Model == nil {
+				yield(nil, fmt.Errorf("agent %q: %w", ctx.Agent().Name(), ErrModelNotConfigured))
+				return
+			}
+
+			req := &model.LLMRequest{
+				Model: f.Model.Name(),
+			}
+
+			// Preprocess before calling the LLM.
+			for ev, err := range f.preprocess(ctx, req) {
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+				if ev != nil {
+					if !yield(ev, nil) {
+						return
+					}
+				}
+			}
+			if ctx.Ended() {
+				return
+			}
+
+			genaiSession, err := f.Model.Connect(ctx, req)
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			defer genaiSession.Close()
+
+			liveRequestQueue := ctx.LiveRequestQueue()
+			if liveRequestQueue == nil {
+				return
+			}
+
+			// Channel to receive messages from genaiSession.Receive()
+			type receiveResult struct {
+				msg *genai.LiveServerMessage
+				err error
+			}
+			receiveChan := make(chan receiveResult, 1)
+
+			// Start goroutine to receive messages from genaiSession
+			go func() {
+				defer close(receiveChan)
+				for {
+					// Check context cancellation before blocking on Receive()
+					select {
+					case <-ctx.Done():
+						return
+					default:
+					}
+
+					msg, err := genaiSession.Receive()
+					if err != nil {
+						select {
+						case <-ctx.Done():
+							return
+						case receiveChan <- receiveResult{msg: nil, err: err}:
+						}
+						return
+					}
+
+					select {
+					case <-ctx.Done():
+						return
+					case receiveChan <- receiveResult{msg: msg, err: nil}:
+					}
+				}
+			}()
+
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case result, ok := <-receiveChan:
+					if !ok {
+						// Channel closed, receive goroutine exited
+						return
+					}
+					if result.err != nil {
+						yield(nil, result.err)
+						return
+					}
+					if result.msg != nil {
+						resp := liveServerMessageToLLMResponse(result.msg)
+						if resp != nil {
+							// === Begin: Handle response from model ===
+							if err := f.postprocess(ctx, req, resp); err != nil {
+								yield(nil, err)
+								return
+							}
+							// adk-python src/google/adk/flows/llm_flows/base_llm_flow.py BaseLlmFlow._postprocess_async.
+							if resp.Content == nil && resp.ErrorCode == "" && !resp.Interrupted {
+								continue
+							}
+
+							// TODO: temporarily convert
+							tools := make(map[string]tool.Tool)
+							for k, v := range req.Tools {
+								tool, ok := v.(tool.Tool)
+								if !ok {
+									if !yield(nil, fmt.Errorf("unexpected tool type %T for tool %v", v, k)) {
+										return
+									}
+								}
+								tools[k] = tool
+							}
+
+							// Build the event and yield.
+							stateDelta := make(map[string]any)
+							modelResponseEvent := f.finalizeModelResponseEvent(ctx, resp, tools, stateDelta)
+							if !yield(modelResponseEvent, nil) {
+								return
+							}
+
+							ev, err := f.handleFunctionCalls(ctx, tools, resp, nil)
+							if err != nil {
+								yield(nil, err)
+								return
+							}
+							if ev == nil {
+								// nothing to yield/process.
+								continue
+							}
+
+							toolConfirmationEvent := generateRequestConfirmationEvent(ctx, modelResponseEvent, ev)
+							if toolConfirmationEvent != nil {
+								if !yield(toolConfirmationEvent, nil) {
+									return
+								}
+							}
+
+							if !yield(ev, nil) {
+								return
+							}
+
+							// If the model response is structured, yield it as a final model response event.
+							outputSchemaResponse, err := retrieveStructuredModelResponse(ev)
+							if err != nil {
+								yield(nil, err)
+								return
+							}
+							if outputSchemaResponse != "" {
+								if !yield(createFinalModelResponseEvent(ctx, outputSchemaResponse), nil) {
+									return
+								}
+							}
+							if ev.Actions.TransferToAgent == "" {
+								return
+							}
+							nextAgent := f.agentToRun(ctx, ev.Actions.TransferToAgent)
+							if nextAgent == nil {
+								yield(nil, fmt.Errorf("failed to find agent: %s", ev.Actions.TransferToAgent))
+								return
+							}
+							for ev, err := range nextAgent.RunLive(ctx) {
+								if !yield(ev, err) || err != nil { // forward
+									return
+								}
+							}
+
+							// === End: Handle response from model ===
+						}
+					}
+				case liveReq, ok := <-liveRequestQueue.Chan():
+					if !ok {
+						// Channel closed
+						return
+					}
+
+					if liveReq.Close {
+						return
+					}
+
+					if liveReq.Realtime != nil {
+						err := genaiSession.SendRealtimeInput(*liveReq.Realtime)
+						if err != nil {
+							yield(nil, err)
+							return
+						}
+					}
+
+					if liveReq.Content != nil {
+						err := genaiSession.SendClientContent(genai.LiveClientContentInput{
+							Turns: []*genai.Content{liveReq.Content},
+						})
+						if err != nil {
+							yield(nil, err)
+							return
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
 func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		if f.Model == nil {
@@ -311,92 +515,6 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 		// TODO: RunLive mode when invocation_context.run_config.support_cfc is true.
 		streamingMode := runconfig.FromContext(ctx).StreamingMode
 		useStream := streamingMode == runconfig.StreamingModeSSE
-
-		if streamingMode == runconfig.StreamingModeBidi {
-			session, err := f.Model.Connect(ctx, req)
-			if err != nil {
-				yield(nil, err)
-				return
-			}
-			defer session.Close()
-
-			liveRequestQueue := ctx.LiveRequestQueue()
-			if liveRequestQueue == nil {
-				return
-			}
-
-			// Channel to receive messages from session.Receive()
-			type receiveResult struct {
-				msg *genai.LiveServerMessage
-				err error
-			}
-			receiveChan := make(chan receiveResult)
-
-			// Start goroutine to receive messages from session
-			go func() {
-				defer close(receiveChan)
-				for {
-					msg, err := session.Receive()
-					select {
-					case <-ctx.Done():
-						return
-					case receiveChan <- receiveResult{msg: msg, err: err}:
-						if err != nil {
-							return
-						}
-					}
-				}
-			}()
-
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case result, ok := <-receiveChan:
-					if !ok {
-						return
-					}
-					if result.err != nil {
-						yield(nil, result.err)
-						return
-					}
-					if result.msg != nil {
-						resp := liveServerMessageToLLMResponse(result.msg)
-						if resp != nil {
-							if !yield(resp, nil) {
-								return
-							}
-						}
-					}
-				case liveReq, ok := <-liveRequestQueue.Chan():
-					if !ok {
-						return
-					}
-
-					if liveReq.Close {
-						return
-					}
-
-					if liveReq.Realtime != nil {
-						err := session.SendRealtimeInput(*liveReq.Realtime)
-						if err != nil {
-							yield(nil, err)
-							return
-						}
-					}
-
-					if liveReq.Content != nil {
-						err := session.SendClientContent(genai.LiveClientContentInput{
-							Turns: []*genai.Content{liveReq.Content},
-						})
-						if err != nil {
-							yield(nil, err)
-							return
-						}
-					}
-				}
-			}
-		}
 
 		for resp, err := range f.Model.GenerateContent(ctx, req, useStream) {
 			if err != nil {

@@ -235,17 +235,28 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 
 func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequestQueue *agent.LiveRequestQueue, cfg agent.RunConfig) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
+		var storedSession session.Session
 		resp, err := r.sessionService.Get(ctx, &session.GetRequest{
 			AppName:   r.appName,
 			UserID:    userID,
 			SessionID: sessionID,
 		})
 		if err != nil {
-			yield(nil, err)
-			return
-		}
+			// create if not exists
+			createResp, err := r.sessionService.Create(ctx, &session.CreateRequest{
+				AppName:   r.appName,
+				UserID:    userID,
+				SessionID: sessionID,
+			})
+			if err != nil {
+				yield(nil, err)
+				return
+			}
 
-		storedSession := resp.Session
+			storedSession = createResp.Session
+		} else {
+			storedSession = resp.Session
+		}
 
 		rootAgent := r.rootAgent
 		// TODO: get last event message from session to find which agent to run next.
@@ -297,7 +308,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequ
 		// pluginManager.RunOnUserMessageCallback
 		pluginManager := r.pluginManager
 
-		for event, err := range agentToRun.Run(ctx) {
+		for event, err := range agentToRun.RunLive(ctx) {
 			if err != nil {
 				if !yield(event, err) {
 					return
