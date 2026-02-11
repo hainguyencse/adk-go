@@ -481,6 +481,9 @@ type invocationContext struct {
 	runConfig        *RunConfig
 	endInvocation    bool
 	liveRequestQueue *LiveRequestQueue
+
+	// Token for resuming live sessions. Returned from Live API
+	liveSessionResumptionHandle string
 }
 
 func (c *invocationContext) Agent() Agent {
@@ -531,6 +534,14 @@ func (c *invocationContext) WithContext(ctx context.Context) InvocationContext {
 
 func (c *invocationContext) LiveRequestQueue() *LiveRequestQueue {
 	return c.liveRequestQueue
+}
+
+func (c *invocationContext) LiveSessionResumptionHandle() string {
+	return c.liveSessionResumptionHandle
+}
+
+func (c *invocationContext) SetLiveSessionResumptionHandle(handle string) {
+	c.liveSessionResumptionHandle = handle
 }
 
 func pluginManagerFromContext(ctx context.Context) pluginManager {

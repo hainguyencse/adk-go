@@ -23,6 +23,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/a2aproject/a2a-go/log"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -122,31 +123,47 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 
 func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		for {
-			// ========== Setup Request ==========
-			if f.Model == nil {
-				yield(nil, fmt.Errorf("agent %q: %w", ctx.Agent().Name(), ErrModelNotConfigured))
+		if f.Model == nil {
+			yield(nil, fmt.Errorf("agent %q: %w", ctx.Agent().Name(), ErrModelNotConfigured))
+			return
+		}
+
+		req := &model.LLMRequest{
+			Model: f.Model.Name(),
+		}
+
+		// Preprocess before calling the LLM.
+		for ev, err := range f.preprocess(ctx, req) {
+			if err != nil {
+				yield(nil, err)
 				return
 			}
-
-			req := &model.LLMRequest{
-				Model: f.Model.Name(),
-			}
-
-			// Preprocess before calling the LLM.
-			for ev, err := range f.preprocess(ctx, req) {
-				if err != nil {
-					yield(nil, err)
+			if ev != nil {
+				if !yield(ev, nil) {
 					return
 				}
-				if ev != nil {
-					if !yield(ev, nil) {
-						return
-					}
-				}
 			}
-			if ctx.Ended() {
-				return
+		}
+		if ctx.Ended() {
+			return
+		}
+
+		log.Info(ctx, "Flow.RunLive: start")
+		attempt := 1
+		for {
+			// Handle resumption connection
+			if handle := ctx.LiveSessionResumptionHandle(); handle != "" {
+				log.Info(ctx, "Resuming live session with handle: %s (attempt %d)", handle, attempt)
+				attempt += 1
+
+				if req.LiveConnectConfig == nil {
+					req.LiveConnectConfig = &genai.LiveConnectConfig{}
+				}
+				if req.LiveConnectConfig.SessionResumption == nil {
+					req.LiveConnectConfig.SessionResumption = &genai.SessionResumptionConfig{}
+				}
+				req.LiveConnectConfig.SessionResumption.Handle = handle
+				req.LiveConnectConfig.SessionResumption.Transparent = true
 			}
 
 			genaiSession, err := f.Model.Connect(ctx, req)
@@ -154,25 +171,14 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 				yield(nil, err)
 				return
 			}
+
 			defer genaiSession.Close()
 
-			liveRequestQueue := ctx.LiveRequestQueue()
-			if liveRequestQueue == nil {
-				return
-			}
-
-			// Channel to receive messages from genaiSession.Receive()
-			type receiveResult struct {
-				msg *genai.LiveServerMessage
-				err error
-			}
-			receiveChan := make(chan receiveResult, 1)
-
-			// Start goroutine to receive messages from genaiSession
+			log.Info(ctx, "Connect Success")
+			// Main loop to receive messages from Gemini Live API session.
+			stateDelta := make(map[string]any)
 			go func() {
-				defer close(receiveChan)
 				for {
-					// Check context cancellation before blocking on Receive()
 					select {
 					case <-ctx.Done():
 						return
@@ -181,123 +187,128 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 
 					msg, err := genaiSession.Receive()
 					if err != nil {
-						select {
-						case <-ctx.Done():
-							return
-						case receiveChan <- receiveResult{msg: nil, err: err}:
-						}
+						yield(nil, err)
 						return
 					}
 
-					select {
-					case <-ctx.Done():
+					llmResponse := liveServerMessageToLLMResponse(msg)
+					if llmResponse == nil {
+						continue
+					}
+
+					fmt.Printf("llmResponse %v \n", llmResponse)
+
+					if llmResponse.LiveSessionResumptionUpdate != nil {
+						ctx.SetLiveSessionResumptionHandle(llmResponse.LiveSessionResumptionUpdate.NewHandle)
+					}
+
+					if err := f.postprocess(ctx, req, llmResponse); err != nil {
+						yield(nil, err)
 						return
-					case receiveChan <- receiveResult{msg: msg, err: nil}:
+					}
+
+					// Skip the model response event if there is no content and no error code.
+					if llmResponse.Content == nil &&
+						llmResponse.ErrorCode == "" &&
+						!llmResponse.Interrupted &&
+						!llmResponse.TurnComplete &&
+						llmResponse.UsageMetadata == nil {
+						fmt.Printf("llmResponse continue")
+						continue
+					}
+
+					fmt.Printf("start tools\n")
+					tools := make(map[string]tool.Tool)
+					for k, v := range req.Tools {
+						tool, ok := v.(tool.Tool)
+						if !ok {
+							if !yield(nil, fmt.Errorf("unexpected tool type %T for tool %v", v, k)) {
+								return
+							}
+						}
+						tools[k] = tool
+					}
+
+					// Build the event and yield.
+					fmt.Printf("finalizeModelResponseEvent \n")
+					modelResponseEvent := f.finalizeModelResponseEvent(ctx, llmResponse, tools, stateDelta)
+					if !yield(modelResponseEvent, nil) {
+						return
+					}
+
+					// Handle function calls.
+					fmt.Printf("handleFunctionCalls \n")
+					ev, err := f.handleFunctionCalls(ctx, tools, llmResponse, nil)
+					if err != nil {
+						yield(nil, err)
+						return
+					}
+					if ev == nil {
+						// nothing to yield/process.
+						continue
+					}
+
+					fmt.Printf("generateRequestConfirmationEvent \n")
+					toolConfirmationEvent := generateRequestConfirmationEvent(ctx, modelResponseEvent, ev)
+					if toolConfirmationEvent != nil {
+						if !yield(toolConfirmationEvent, nil) {
+							return
+						}
+					}
+
+					if !yield(ev, nil) {
+						return
+					}
+
+					fmt.Printf("retrieveStructuredModelResponse \n")
+					// If the model response is structured, yield it as a final model response event.
+					outputSchemaResponse, err := retrieveStructuredModelResponse(ev)
+					if err != nil {
+						yield(nil, err)
+						return
+					}
+					if outputSchemaResponse != "" {
+						if !yield(createFinalModelResponseEvent(ctx, outputSchemaResponse), nil) {
+							return
+						}
+					}
+
+					// Actually handle "transfer_to_agent" tool. The function call sets the ev.Actions.TransferToAgent field.
+					fmt.Printf("ev.Actions.TransferToAgent: %s\n", ev.Actions.TransferToAgent)
+					if ev.Actions.TransferToAgent != "" {
+						fmt.Printf("Transfer to agent: %s", ev.Actions.TransferToAgent)
+
+						nextAgent := f.agentToRun(ctx, ev.Actions.TransferToAgent)
+						if nextAgent == nil {
+							yield(nil, fmt.Errorf("failed to find agent: %s", ev.Actions.TransferToAgent))
+							return
+						}
+
+						err = genaiSession.Close()
+						if err != nil {
+							yield(nil, fmt.Errorf("failed to close session for agent %s: %w", ev.Actions.TransferToAgent, err))
+							return
+						}
+
+						for ev, err := range nextAgent.RunLive(ctx) {
+							fmt.Printf("nextAgent.RunLive: %v", ev)
+							if !yield(ev, err) || err != nil {
+								return
+							}
+						}
 					}
 				}
 			}()
 
+			// Main loop to send messages.
 			for {
+				liveRequestQueue := ctx.LiveRequestQueue()
 				select {
 				case <-ctx.Done():
 					return
-				case result, ok := <-receiveChan:
-					if !ok {
-						// Channel closed, receive goroutine exited
-						return
-					}
-					if result.err != nil {
-						yield(nil, result.err)
-						return
-					}
-					if result.msg != nil {
-						resp := liveServerMessageToLLMResponse(result.msg)
-						if resp != nil {
-							// === Begin: Handle response from model ===
-							if err := f.postprocess(ctx, req, resp); err != nil {
-								yield(nil, err)
-								return
-							}
-							// adk-python src/google/adk/flows/llm_flows/base_llm_flow.py BaseLlmFlow._postprocess_async.
-							if resp.Content == nil && resp.ErrorCode == "" && !resp.Interrupted {
-								continue
-							}
-
-							// TODO: temporarily convert
-							tools := make(map[string]tool.Tool)
-							for k, v := range req.Tools {
-								tool, ok := v.(tool.Tool)
-								if !ok {
-									if !yield(nil, fmt.Errorf("unexpected tool type %T for tool %v", v, k)) {
-										return
-									}
-								}
-								tools[k] = tool
-							}
-
-							// Build the event and yield.
-							stateDelta := make(map[string]any)
-							modelResponseEvent := f.finalizeModelResponseEvent(ctx, resp, tools, stateDelta)
-							if !yield(modelResponseEvent, nil) {
-								return
-							}
-
-							ev, err := f.handleFunctionCalls(ctx, tools, resp, nil)
-							if err != nil {
-								yield(nil, err)
-								return
-							}
-							if ev == nil {
-								// nothing to yield/process.
-								continue
-							}
-
-							toolConfirmationEvent := generateRequestConfirmationEvent(ctx, modelResponseEvent, ev)
-							if toolConfirmationEvent != nil {
-								if !yield(toolConfirmationEvent, nil) {
-									return
-								}
-							}
-
-							if !yield(ev, nil) {
-								return
-							}
-
-							// If the model response is structured, yield it as a final model response event.
-							outputSchemaResponse, err := retrieveStructuredModelResponse(ev)
-							if err != nil {
-								yield(nil, err)
-								return
-							}
-							if outputSchemaResponse != "" {
-								if !yield(createFinalModelResponseEvent(ctx, outputSchemaResponse), nil) {
-									return
-								}
-							}
-							if ev.Actions.TransferToAgent == "" {
-								return
-							}
-							nextAgent := f.agentToRun(ctx, ev.Actions.TransferToAgent)
-							if nextAgent == nil {
-								yield(nil, fmt.Errorf("failed to find agent: %s", ev.Actions.TransferToAgent))
-								return
-							}
-							for ev, err := range nextAgent.RunLive(ctx) {
-								if !yield(ev, err) || err != nil { // forward
-									return
-								}
-							}
-
-							// === End: Handle response from model ===
-						}
-					}
 				case liveReq, ok := <-liveRequestQueue.Chan():
-					if !ok {
+					if !ok || liveReq.Close {
 						// Channel closed
-						return
-					}
-
-					if liveReq.Close {
 						return
 					}
 
@@ -568,6 +579,10 @@ func liveServerMessageToLLMResponse(msg *genai.LiveServerMessage) *model.LLMResp
 
 	resp := &model.LLMResponse{}
 
+	if msg.SessionResumptionUpdate != nil {
+		resp.LiveSessionResumptionUpdate = msg.SessionResumptionUpdate
+	}
+
 	if msg.ServerContent != nil {
 		if msg.ServerContent.ModelTurn != nil {
 			resp.Content = msg.ServerContent.ModelTurn
@@ -596,7 +611,10 @@ func liveServerMessageToLLMResponse(msg *genai.LiveServerMessage) *model.LLMResp
 	}
 
 	// Skip if no meaningful content
-	if resp.Content == nil && !resp.TurnComplete && !resp.Interrupted {
+	if resp.Content == nil &&
+		!resp.TurnComplete &&
+		!resp.Interrupted &&
+		resp.UsageMetadata == nil {
 		return nil
 	}
 

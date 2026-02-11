@@ -102,6 +102,10 @@ type InvocationContext interface {
 	WithContext(ctx context.Context) InvocationContext
 
 	LiveRequestQueue() *LiveRequestQueue
+
+	// Get token for resuming live sessions. this token return from Live API. And store in context
+	LiveSessionResumptionHandle() string
+	SetLiveSessionResumptionHandle(string)
 }
 
 // ReadonlyContext provides read-only access to invocation context data.

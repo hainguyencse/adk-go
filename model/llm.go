@@ -63,4 +63,6 @@ type LLMResponse struct {
 	ErrorMessage string
 	FinishReason genai.FinishReason
 	AvgLogprobs  float64
+
+	LiveSessionResumptionUpdate *genai.LiveServerSessionResumptionUpdate
 }

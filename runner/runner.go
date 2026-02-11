@@ -258,10 +258,12 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequ
 			storedSession = resp.Session
 		}
 
-		rootAgent := r.rootAgent
-		// TODO: get last event message from session to find which agent to run next.
-		// otherwise fallback to root agent.
-		agentToRun := rootAgent
+		agentToRun, err := r.findAgentToRunFromLastEvent(storedSession, r.rootAgent)
+		fmt.Println("agentToRun: ", agentToRun.Name())
+		if err != nil {
+			yield(nil, err)
+			return
+		}
 
 		ctx = parentmap.ToContext(ctx, r.parents)
 		ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
@@ -297,17 +299,8 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequ
 			LiveRequestQueue: liveRequestQueue,
 			RunConfig:        &cfg,
 		})
-		// ctx, err = r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager)
-		// if err != nil {
-		// 	yield(nil, err)
-		// 	return
-		// }
 
-		// TODO: Check if should handle
-		// pluginManager.RunBeforeRunCallback
-		// pluginManager.RunOnUserMessageCallback
 		pluginManager := r.pluginManager
-
 		for event, err := range agentToRun.RunLive(ctx) {
 			if err != nil {
 				if !yield(event, err) {
@@ -407,6 +400,35 @@ func (r *Runner) findAgentToRun(session session.Session, msg *genai.Content) (ag
 			return subAgent, nil
 		}
 		log.Printf("Function call from an unknown agent: %s, event id: %s", event.Author, event.ID)
+	}
+
+	events := session.Events()
+	for i := events.Len() - 1; i >= 0; i-- {
+		event := events.At(i)
+
+		if event.Author == "user" {
+			continue
+		}
+
+		subAgent := findAgent(r.rootAgent, event.Author)
+		// Agent not found, continue looking for the other event.
+		if subAgent == nil {
+			log.Printf("Event from an unknown agent: %s, event id: %s", event.Author, event.ID)
+			continue
+		}
+
+		if r.isTransferableAcrossAgentTree(subAgent) {
+			return subAgent, nil
+		}
+	}
+
+	// Falls back to root agent if no suitable agents are found in the session.
+	return r.rootAgent, nil
+}
+
+func (r *Runner) findAgentToRunFromLastEvent(session session.Session, rootAgent agent.Agent) (agent.Agent, error) {
+	if session.Events().Len() == 0 {
+		return rootAgent, nil
 	}
 
 	events := session.Events()
