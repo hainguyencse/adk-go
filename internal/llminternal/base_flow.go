@@ -22,6 +22,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/a2aproject/a2a-go/log"
 	"google.golang.org/genai"
@@ -166,16 +167,35 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 				req.LiveConnectConfig.SessionResumption.Transparent = true
 			}
 
+			if len(req.Config.Tools) > 0 {
+				req.LiveConnectConfig.Tools = req.Config.Tools
+			}
+
+			for _, tool := range req.LiveConnectConfig.Tools {
+				fmt.Println("req.LiveConnectConfig.Tools =>", tool.FunctionDeclarations)
+				for _, funcDecl := range tool.FunctionDeclarations {
+					fmt.Println("req.LiveConnectConfig.funcDecl.Name =>", funcDecl.Name)
+				}
+			}
+
 			genaiSession, err := f.Model.Connect(ctx, req)
 			if err != nil {
 				yield(nil, err)
 				return
 			}
 
-			defer genaiSession.Close()
+			var closeOnce sync.Once
+			closeSession := func() {
+				closeOnce.Do(func() {
+					genaiSession.Close()
+				})
+			}
+			// Ensure session is always closed when this iteration exits.
+			defer closeSession()
 
-			log.Info(ctx, "Connect Success")
+			log.Info(ctx, "Main loop to receive messages from Gemini Live API session.")
 			// Main loop to receive messages from Gemini Live API session.
+			agentTransferDone := make(chan struct{})
 			stateDelta := make(map[string]any)
 			go func() {
 				for {
@@ -191,12 +211,14 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 						return
 					}
 
+					fmt.Printf("receive message %v \n", msg)
+
 					llmResponse := liveServerMessageToLLMResponse(msg)
 					if llmResponse == nil {
 						continue
 					}
 
-					fmt.Printf("llmResponse %v \n", llmResponse)
+					fmt.Printf("llmResponse %v \n", llmResponse.Content)
 
 					if llmResponse.LiveSessionResumptionUpdate != nil {
 						ctx.SetLiveSessionResumptionHandle(llmResponse.LiveSessionResumptionUpdate.NewHandle)
@@ -237,7 +259,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 					}
 
 					// Handle function calls.
-					fmt.Printf("handleFunctionCalls \n")
+					fmt.Printf("handleFunctionCalls %v\n", llmResponse)
 					ev, err := f.handleFunctionCalls(ctx, tools, llmResponse, nil)
 					if err != nil {
 						yield(nil, err)
@@ -284,11 +306,9 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 							return
 						}
 
-						err = genaiSession.Close()
-						if err != nil {
-							yield(nil, fmt.Errorf("failed to close session for agent %s: %w", ev.Actions.TransferToAgent, err))
-							return
-						}
+						// Close current session before starting sub-agent's session.
+						closeSession()
+						close(agentTransferDone)
 
 						for ev, err := range nextAgent.RunLive(ctx) {
 							fmt.Printf("nextAgent.RunLive: %v", ev)
@@ -296,6 +316,8 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 								return
 							}
 						}
+
+						return
 					}
 				}
 			}()
@@ -306,9 +328,13 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 				select {
 				case <-ctx.Done():
 					return
+				case <-agentTransferDone:
+					// Transfer happened, stop this send loop.
+					// Session already closed by goroutine; sub-agent owns liveRequestQueue.
+					return
 				case liveReq, ok := <-liveRequestQueue.Chan():
+					fmt.Println("liveReq ==>", liveReq)
 					if !ok || liveReq.Close {
-						// Channel closed
 						return
 					}
 
@@ -759,6 +785,10 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 
 	fnCalls := utils.FunctionCalls(resp.Content)
 	toolNames := slices.Collect(maps.Keys(toolsDict))
+
+	fmt.Println("fnCalls ==>", fnCalls)
+	fmt.Println("resp.Content ==>", resp.Content)
+	fmt.Println("toolNames", toolNames)
 	var result map[string]any
 	for _, fnCall := range fnCalls {
 		var confirmation *toolconfirmation.ToolConfirmation
