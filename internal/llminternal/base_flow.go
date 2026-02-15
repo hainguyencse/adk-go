@@ -193,7 +193,40 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 			// Ensure session is always closed when this iteration exits.
 			defer closeSession()
 
-			// Send History
+			// Send conversation history so the model has context from previous
+			// turns (especially important after agent transfer where the new
+			// agent's Gemini session starts fresh).
+			// Match Python's send_history: send all contents in one call and set
+			// turn_complete based on whether the last content is from the user.
+			// If the last content is a user message, the model responds immediately;
+			// otherwise it waits for new user input.
+			if len(req.Contents) > 0 {
+				// Filter out audio parts from history because:
+				// 1. Audio has already been transcribed.
+				// 2. Sending audio via SendClientContent is not supported by
+				//    the Live API (the session will be corrupted).
+				// This matches Python's send_history → filter_audio_parts.
+				var filteredContents []*genai.Content
+				for _, c := range req.Contents {
+					fc := filterAudioParts(c)
+					if fc != nil {
+						filteredContents = append(filteredContents, fc)
+					}
+				}
+
+				if len(filteredContents) > 0 {
+					log.Info(ctx, "Sending %d history content(s) to Live session.", len(filteredContents))
+					lastRole := filteredContents[len(filteredContents)-1].Role
+					turnComplete := lastRole == "user"
+					if err := genaiSession.SendClientContent(genai.LiveClientContentInput{
+						Turns:        filteredContents,
+						TurnComplete: genai.Ptr(turnComplete),
+					}); err != nil {
+						yield(nil, err)
+						return
+					}
+				}
+			}
 
 			log.Info(ctx, "Main loop to receive messages from Gemini Live API session.")
 			// Main loop to receive messages from Gemini Live API session.
@@ -210,6 +243,11 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 			transferCh := make(chan string, 1)
 			goroutineDone := make(chan struct{})
 			stateDelta := make(map[string]any)
+
+			// Accumulate partial transcription text across messages,
+			// matching Python's GeminiLlmConnection.receive() pattern.
+			var inputTranscriptionText string
+			var outputTranscriptionText string
 
 			go func() {
 				defer close(goroutineDone)
@@ -239,12 +277,74 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 						ctx.SetLiveSessionResumptionHandle(llmResponse.LiveSessionResumptionUpdate.NewHandle)
 					}
 
+					// Handle input transcription: accumulate partial text and
+					// yield a user event when the transcription is finished.
+					// This mirrors Python's GeminiLlmConnection.receive().
+					if llmResponse.InputTranscription != nil {
+						if llmResponse.InputTranscription.Text != "" {
+							inputTranscriptionText += llmResponse.InputTranscription.Text
+						}
+						if llmResponse.InputTranscription.Finished && inputTranscriptionText != "" {
+							// Create a user event from the finished transcription
+							// so it's persisted in the session for sub-agents.
+							userEvent := session.NewEvent(ctx.InvocationID())
+							userEvent.Author = "user"
+							userEvent.Branch = ctx.Branch()
+							userEvent.LLMResponse = model.LLMResponse{
+								Content: &genai.Content{
+									Role:  "user",
+									Parts: []*genai.Part{{Text: inputTranscriptionText}},
+								},
+								InputTranscription: &genai.Transcription{
+									Text:     inputTranscriptionText,
+									Finished: true,
+								},
+							}
+							recvCh <- recvResult{ev: userEvent}
+							inputTranscriptionText = ""
+						}
+					}
+
+					// Accumulate output transcription similarly.
+					if llmResponse.OutputTranscription != nil {
+						if llmResponse.OutputTranscription.Text != "" {
+							outputTranscriptionText += llmResponse.OutputTranscription.Text
+						}
+						if llmResponse.OutputTranscription.Finished {
+							outputTranscriptionText = ""
+						}
+					}
+
+					// Flush pending transcriptions on turn_complete/interrupted,
+					// matching Python's Gemini API fallback behavior.
+					if llmResponse.TurnComplete || llmResponse.Interrupted {
+						if inputTranscriptionText != "" {
+							userEvent := session.NewEvent(ctx.InvocationID())
+							userEvent.Author = "user"
+							userEvent.Branch = ctx.Branch()
+							userEvent.LLMResponse = model.LLMResponse{
+								Content: &genai.Content{
+									Role:  "user",
+									Parts: []*genai.Part{{Text: inputTranscriptionText}},
+								},
+								InputTranscription: &genai.Transcription{
+									Text:     inputTranscriptionText,
+									Finished: true,
+								},
+							}
+							recvCh <- recvResult{ev: userEvent}
+							inputTranscriptionText = ""
+						}
+						outputTranscriptionText = ""
+					}
+
 					if err := f.postprocess(ctx, req, llmResponse); err != nil {
 						recvCh <- recvResult{err: err}
 						return
 					}
 
 					// Skip the model response event if there is no content and no error code.
+					// Transcription-only messages are handled above, so skip them here.
 					if llmResponse.Content == nil &&
 						llmResponse.ErrorCode == "" &&
 						!llmResponse.Interrupted &&
@@ -384,8 +484,34 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 					}
 
 					if liveReq.Content != nil {
+						// Match Python's _send_to_model: persist user text content
+						// to the session so that sub-agents see it after transfer.
+						// Skip function responses - they are handled separately.
+						isFuncResp := false
+						for _, p := range liveReq.Content.Parts {
+							if p.FunctionResponse != nil {
+								isFuncResp = true
+								break
+							}
+						}
+						if !isFuncResp {
+							if liveReq.Content.Role == "" {
+								liveReq.Content.Role = "user"
+							}
+							userEvent := session.NewEvent(ctx.InvocationID())
+							userEvent.Author = "user"
+							userEvent.Branch = ctx.Branch()
+							userEvent.LLMResponse = model.LLMResponse{
+								Content: liveReq.Content,
+							}
+							if !yield(userEvent, nil) {
+								return
+							}
+						}
+
 						err := genaiSession.SendClientContent(genai.LiveClientContentInput{
-							Turns: []*genai.Content{liveReq.Content},
+							Turns:        []*genai.Content{liveReq.Content},
+							TurnComplete: genai.Ptr(true),
 						})
 						if err != nil {
 							yield(nil, err)
@@ -652,6 +778,8 @@ func liveServerMessageToLLMResponse(msg *genai.LiveServerMessage) *model.LLMResp
 		}
 		resp.TurnComplete = msg.ServerContent.TurnComplete
 		resp.Interrupted = msg.ServerContent.Interrupted
+		resp.InputTranscription = msg.ServerContent.InputTranscription
+		resp.OutputTranscription = msg.ServerContent.OutputTranscription
 	}
 
 	if msg.ToolCall != nil && len(msg.ToolCall.FunctionCalls) > 0 {
@@ -677,7 +805,9 @@ func liveServerMessageToLLMResponse(msg *genai.LiveServerMessage) *model.LLMResp
 	if resp.Content == nil &&
 		!resp.TurnComplete &&
 		!resp.Interrupted &&
-		resp.UsageMetadata == nil {
+		resp.UsageMetadata == nil &&
+		resp.InputTranscription == nil &&
+		resp.OutputTranscription == nil {
 		return nil
 	}
 
@@ -697,6 +827,39 @@ func extractFunctionResponses(ev *session.Event) []*genai.FunctionResponse {
 		}
 	}
 	return resps
+}
+
+// isAudioPart returns true if the part contains audio data (inline or file).
+func isAudioPart(p *genai.Part) bool {
+	if p.InlineData != nil && strings.HasPrefix(p.InlineData.MIMEType, "audio/") {
+		return true
+	}
+	if p.FileData != nil && strings.HasPrefix(p.FileData.MIMEType, "audio/") {
+		return true
+	}
+	return false
+}
+
+// filterAudioParts returns a copy of the content with audio parts removed.
+// Returns nil if no non-audio parts remain.
+// This matches Python's filter_audio_parts in content_utils.py.
+func filterAudioParts(c *genai.Content) *genai.Content {
+	if c == nil || len(c.Parts) == 0 {
+		return nil
+	}
+	var filtered []*genai.Part
+	for _, p := range c.Parts {
+		if !isAudioPart(p) {
+			filtered = append(filtered, p)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return &genai.Content{
+		Role:  c.Role,
+		Parts: filtered,
+	}
 }
 
 func (f *Flow) runAfterModelCallbacks(ctx agent.InvocationContext, llmResp *model.LLMResponse, stateDelta map[string]any, llmErr error) (*model.LLMResponse, error) {

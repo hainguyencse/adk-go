@@ -65,4 +65,9 @@ type LLMResponse struct {
 	AvgLogprobs  float64
 
 	LiveSessionResumptionUpdate *genai.LiveServerSessionResumptionUpdate
+
+	// Audio transcription of user input (from Gemini Live API).
+	InputTranscription *genai.Transcription
+	// Audio transcription of model output (from Gemini Live API).
+	OutputTranscription *genai.Transcription
 }
