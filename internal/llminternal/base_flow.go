@@ -212,8 +212,31 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 
 			// Accumulate partial transcription text across messages,
 			// matching Python's GeminiLlmConnection.receive() pattern.
-			// var inputTranscriptionText string
-			// var outputTranscriptionText string
+			var inputTranscriptionText string
+
+			// flushTranscription creates a user event from accumulated
+			// transcription text and sends it to recvCh so it gets
+			// persisted in the session before any agent transfer.
+			flushTranscription := func() {
+				if inputTranscriptionText == "" {
+					return
+				}
+				userEvent := session.NewEvent(ctx.InvocationID())
+				userEvent.Author = "user"
+				userEvent.Branch = ctx.Branch()
+				userEvent.LLMResponse = model.LLMResponse{
+					Content: &genai.Content{
+						Role:  "user",
+						Parts: []*genai.Part{{Text: inputTranscriptionText}},
+					},
+					InputTranscription: &genai.Transcription{
+						Text:     inputTranscriptionText,
+						Finished: true,
+					},
+				}
+				recvCh <- recvResult{ev: userEvent}
+				inputTranscriptionText = ""
+			}
 
 			go func() {
 				defer close(goroutineDone)
@@ -239,66 +262,23 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 						ctx.SetLiveSessionResumptionHandle(llmResponse.LiveSessionResumptionUpdate.NewHandle)
 					}
 
-					// // Handle input transcription: accumulate partial text and
-					// // yield a user event when the transcription is finished.
-					// // This mirrors Python's GeminiLlmConnection.receive().
-					// if llmResponse.InputTranscription != nil {
-					// 	if llmResponse.InputTranscription.Text != "" {
-					// 		inputTranscriptionText += llmResponse.InputTranscription.Text
-					// 	}
-					// 	if llmResponse.InputTranscription.Finished && inputTranscriptionText != "" {
-					// 		// Create a user event from the finished transcription
-					// 		// so it's persisted in the session for sub-agents.
-					// 		userEvent := session.NewEvent(ctx.InvocationID())
-					// 		userEvent.Author = "user"
-					// 		userEvent.Branch = ctx.Branch()
-					// 		userEvent.LLMResponse = model.LLMResponse{
-					// 			Content: &genai.Content{
-					// 				Role:  "user",
-					// 				Parts: []*genai.Part{{Text: inputTranscriptionText}},
-					// 			},
-					// 			InputTranscription: &genai.Transcription{
-					// 				Text:     inputTranscriptionText,
-					// 				Finished: true,
-					// 			},
-					// 		}
-					// 		recvCh <- recvResult{ev: userEvent}
-					// 		inputTranscriptionText = ""
-					// 	}
-					// }
+					// Handle input transcription: accumulate partial text and
+					// yield a user event when the transcription is finished.
+					// This mirrors Python's GeminiLlmConnection.receive().
+					if llmResponse.InputTranscription != nil {
+						if llmResponse.InputTranscription.Text != "" {
+							inputTranscriptionText += llmResponse.InputTranscription.Text
+						}
+						if llmResponse.InputTranscription.Finished {
+							flushTranscription()
+						}
+					}
 
-					// // Accumulate output transcription similarly.
-					// if llmResponse.OutputTranscription != nil {
-					// 	if llmResponse.OutputTranscription.Text != "" {
-					// 		outputTranscriptionText += llmResponse.OutputTranscription.Text
-					// 	}
-					// 	if llmResponse.OutputTranscription.Finished {
-					// 		outputTranscriptionText = ""
-					// 	}
-					// }
-
-					// // Flush pending transcriptions on turn_complete/interrupted,
-					// // matching Python's Gemini API fallback behavior.
-					// if llmResponse.TurnComplete || llmResponse.Interrupted {
-					// 	if inputTranscriptionText != "" {
-					// 		userEvent := session.NewEvent(ctx.InvocationID())
-					// 		userEvent.Author = "user"
-					// 		userEvent.Branch = ctx.Branch()
-					// 		userEvent.LLMResponse = model.LLMResponse{
-					// 			Content: &genai.Content{
-					// 				Role:  "user",
-					// 				Parts: []*genai.Part{{Text: inputTranscriptionText}},
-					// 			},
-					// 			InputTranscription: &genai.Transcription{
-					// 				Text:     inputTranscriptionText,
-					// 				Finished: true,
-					// 			},
-					// 		}
-					// 		recvCh <- recvResult{ev: userEvent}
-					// 		inputTranscriptionText = ""
-					// 	}
-					// 	outputTranscriptionText = ""
-					// }
+					// Flush pending transcriptions on turn_complete/interrupted,
+					// matching Python's Gemini API fallback behavior.
+					if llmResponse.TurnComplete || llmResponse.Interrupted {
+						flushTranscription()
+					}
 
 					if err := f.postprocess(ctx, req, llmResponse); err != nil {
 						recvCh <- recvResult{err: err}
@@ -354,6 +334,9 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 
 					// Signal transfer to main goroutine instead of handling it here.
 					if ev.Actions.TransferToAgent != "" {
+						// Flush any pending transcription before transferring so
+						// the sub-agent sees the user's last message in session history.
+						flushTranscription()
 						transferAgentCh <- ev.Actions.TransferToAgent
 						return
 					}
