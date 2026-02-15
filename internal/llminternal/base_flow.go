@@ -193,11 +193,26 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 			// Ensure session is always closed when this iteration exits.
 			defer closeSession()
 
+			// Send History
+
 			log.Info(ctx, "Main loop to receive messages from Gemini Live API session.")
 			// Main loop to receive messages from Gemini Live API session.
-			agentTransferDone := make(chan struct{})
+			//
+			// The receive goroutine processes incoming messages and signals transfer
+			// requests back to the main goroutine via transferCh. This ensures the
+			// parent's iterator function stays alive during a transfer, so the caller
+			// keeps producing messages for the sub-agent's liveRequestQueue.
+			type recvResult struct {
+				ev  *session.Event
+				err error
+			}
+			recvCh := make(chan recvResult, 1)
+			transferCh := make(chan string, 1)
+			goroutineDone := make(chan struct{})
 			stateDelta := make(map[string]any)
+
 			go func() {
+				defer close(goroutineDone)
 				for {
 					select {
 					case <-ctx.Done():
@@ -207,7 +222,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 
 					msg, err := genaiSession.Receive()
 					if err != nil {
-						yield(nil, err)
+						recvCh <- recvResult{err: err}
 						return
 					}
 
@@ -225,7 +240,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 					}
 
 					if err := f.postprocess(ctx, req, llmResponse); err != nil {
-						yield(nil, err)
+						recvCh <- recvResult{err: err}
 						return
 					}
 
@@ -244,9 +259,8 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 					for k, v := range req.Tools {
 						tool, ok := v.(tool.Tool)
 						if !ok {
-							if !yield(nil, fmt.Errorf("unexpected tool type %T for tool %v", v, k)) {
-								return
-							}
+							recvCh <- recvResult{err: fmt.Errorf("unexpected tool type %T for tool %v", v, k)}
+							return
 						}
 						tools[k] = tool
 					}
@@ -254,15 +268,13 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 					// Build the event and yield.
 					fmt.Printf("finalizeModelResponseEvent \n")
 					modelResponseEvent := f.finalizeModelResponseEvent(ctx, llmResponse, tools, stateDelta)
-					if !yield(modelResponseEvent, nil) {
-						return
-					}
+					recvCh <- recvResult{ev: modelResponseEvent}
 
 					// Handle function calls.
 					fmt.Printf("handleFunctionCalls %v\n", llmResponse)
 					ev, err := f.handleFunctionCalls(ctx, tools, llmResponse, nil)
 					if err != nil {
-						yield(nil, err)
+						recvCh <- recvResult{err: err}
 						return
 					}
 					if ev == nil {
@@ -273,65 +285,90 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 					fmt.Printf("generateRequestConfirmationEvent \n")
 					toolConfirmationEvent := generateRequestConfirmationEvent(ctx, modelResponseEvent, ev)
 					if toolConfirmationEvent != nil {
-						if !yield(toolConfirmationEvent, nil) {
-							return
-						}
+						recvCh <- recvResult{ev: toolConfirmationEvent}
 					}
 
-					if !yield(ev, nil) {
-						return
-					}
+					recvCh <- recvResult{ev: ev}
 
 					fmt.Printf("retrieveStructuredModelResponse \n")
 					// If the model response is structured, yield it as a final model response event.
 					outputSchemaResponse, err := retrieveStructuredModelResponse(ev)
 					if err != nil {
-						yield(nil, err)
+						recvCh <- recvResult{err: err}
 						return
 					}
 					if outputSchemaResponse != "" {
-						if !yield(createFinalModelResponseEvent(ctx, outputSchemaResponse), nil) {
-							return
-						}
+						recvCh <- recvResult{ev: createFinalModelResponseEvent(ctx, outputSchemaResponse)}
 					}
 
-					// Actually handle "transfer_to_agent" tool. The function call sets the ev.Actions.TransferToAgent field.
+					// Signal transfer to main goroutine instead of handling it here.
 					fmt.Printf("ev.Actions.TransferToAgent: %s\n", ev.Actions.TransferToAgent)
 					if ev.Actions.TransferToAgent != "" {
-						fmt.Printf("Transfer to agent: %s", ev.Actions.TransferToAgent)
-
-						nextAgent := f.agentToRun(ctx, ev.Actions.TransferToAgent)
-						if nextAgent == nil {
-							yield(nil, fmt.Errorf("failed to find agent: %s", ev.Actions.TransferToAgent))
-							return
-						}
-
-						// Close current session before starting sub-agent's session.
-						closeSession()
-						close(agentTransferDone)
-
-						for ev, err := range nextAgent.RunLive(ctx) {
-							fmt.Printf("nextAgent.RunLive: %v", ev)
-							if !yield(ev, err) || err != nil {
-								return
-							}
-						}
-
+						transferCh <- ev.Actions.TransferToAgent
 						return
 					}
 				}
 			}()
 
-			// Main loop to send messages.
+			// Main loop: multiplexes sends and receives on the main goroutine.
+			// This ensures the iterator function stays alive during transfers,
+			// so the caller keeps producing messages for sub-agents.
+		sendLoop:
 			for {
 				liveRequestQueue := ctx.LiveRequestQueue()
 				select {
 				case <-ctx.Done():
 					return
-				case <-agentTransferDone:
-					// Transfer happened, stop this send loop.
-					// Session already closed by goroutine; sub-agent owns liveRequestQueue.
-					return
+
+				case result := <-recvCh:
+					if result.err != nil {
+						yield(nil, result.err)
+						return
+					}
+					if result.ev != nil {
+						if !yield(result.ev, nil) {
+							return
+						}
+						// Send tool responses back to Gemini Live API so the model
+						// can continue the conversation based on tool results.
+						if fnResps := extractFunctionResponses(result.ev); len(fnResps) > 0 {
+							if err := genaiSession.SendToolResponse(genai.LiveToolResponseInput{
+								FunctionResponses: fnResps,
+							}); err != nil {
+								yield(nil, err)
+								return
+							}
+						}
+					}
+
+				case agentName := <-transferCh:
+					// Transfer requested by receive goroutine.
+					// Close current session and wait for goroutine to exit.
+					closeSession()
+					<-goroutineDone
+
+					// Clear the resumption handle: the session it belonged to is now
+					// closed, and the next agent has different tools/instructions so
+					// it must start a fresh Gemini Live session.
+					ctx.SetLiveSessionResumptionHandle("")
+
+					fmt.Printf("Transfer to agent: %s\n", agentName)
+					nextAgent := f.agentToRun(ctx, agentName)
+					if nextAgent == nil {
+						yield(nil, fmt.Errorf("failed to find agent: %s", agentName))
+						return
+					}
+
+					// Run sub-agent on the main goroutine. The iterator function
+					// stays alive, so the caller keeps sending to liveRequestQueue.
+					for ev, err := range nextAgent.RunLive(ctx) {
+						fmt.Printf("nextAgent.RunLive: %v\n", ev)
+						if !yield(ev, err) || err != nil {
+							return
+						}
+					}
+					break sendLoop
+
 				case liveReq, ok := <-liveRequestQueue.Chan():
 					fmt.Println("liveReq ==>", liveReq)
 					if !ok || liveReq.Close {
@@ -645,6 +682,21 @@ func liveServerMessageToLLMResponse(msg *genai.LiveServerMessage) *model.LLMResp
 	}
 
 	return resp
+}
+
+// extractFunctionResponses returns FunctionResponse parts from an event, if any.
+// Used to send tool results back to the Gemini Live API via SendToolResponse.
+func extractFunctionResponses(ev *session.Event) []*genai.FunctionResponse {
+	if ev == nil || ev.LLMResponse.Content == nil {
+		return nil
+	}
+	var resps []*genai.FunctionResponse
+	for _, part := range ev.LLMResponse.Content.Parts {
+		if part.FunctionResponse != nil {
+			resps = append(resps, part.FunctionResponse)
+		}
+	}
+	return resps
 }
 
 func (f *Flow) runAfterModelCallbacks(ctx agent.InvocationContext, llmResp *model.LLMResponse, stateDelta map[string]any, llmErr error) (*model.LLMResponse, error) {

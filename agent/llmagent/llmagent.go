@@ -387,15 +387,16 @@ func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 func (a *llmAgent) runLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	// TODO: branch context?
 	ctx = icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-		Artifacts:        ctx.Artifacts(),
-		Memory:           ctx.Memory(),
-		Session:          ctx.Session(),
-		Branch:           ctx.Branch(),
-		Agent:            a,
-		UserContent:      ctx.UserContent(),
-		RunConfig:        ctx.RunConfig(),
-		InvocationID:     ctx.InvocationID(),
-		LiveRequestQueue: ctx.LiveRequestQueue(),
+		Artifacts:                   ctx.Artifacts(),
+		Memory:                      ctx.Memory(),
+		Session:                     ctx.Session(),
+		Branch:                      ctx.Branch(),
+		Agent:                       a,
+		UserContent:                 ctx.UserContent(),
+		RunConfig:                   ctx.RunConfig(),
+		InvocationID:                ctx.InvocationID(),
+		LiveRequestQueue:            ctx.LiveRequestQueue(),
+		LiveSessionResumptionHandle: ctx.LiveSessionResumptionHandle(),
 	})
 
 	f := &llminternal.Flow{
