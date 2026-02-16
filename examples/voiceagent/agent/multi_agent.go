@@ -6,11 +6,14 @@ import (
 	"log"
 	"os"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 	adkagent "google.golang.org/adk/agent"
 	adkagentllm "google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/adk/tool/mcptoolset"
 	"google.golang.org/genai"
 )
 
@@ -19,6 +22,7 @@ import (
 // Root: ACMRootAgent - Company info and routing
 // Sub1: HRACMAgent - Employee info (name, address, phone)
 // Sub2: SalaryACMAgent - Employee salary info
+// Sub3: SalesAgent - Sales and user detail info (via MCP server)
 // ============================================================
 
 // ==================== Data Models ====================
@@ -107,6 +111,36 @@ func NewMultiAgentSystem(ctx context.Context) (adkagent.Agent, error) {
 		return nil, fmt.Errorf("failed to create Salary agent: %w", err)
 	}
 
+	// ========== Create Sales Sub-Agent (MCP) ==========
+	salesMCPServer := os.Getenv("SALES_PLUS_MCP")
+	if salesMCPServer == "" {
+		salesMCPServer = "http://localhost:8888"
+	}
+
+	salesMCPTransport := &mcp.StreamableClientTransport{
+		Endpoint: fmt.Sprintf("%s/streaming", salesMCPServer),
+	}
+
+	salesMCPToolSet, err := mcptoolset.New(mcptoolset.Config{
+		Transport: salesMCPTransport,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create sales MCP tool set: %w", err)
+	}
+
+	salesAgent, err := adkagentllm.New(adkagentllm.Config{
+		Name:        "sales_agent",
+		Description: "Sales department - handles sales data and user detail lookup by ID (via MCP server)",
+		Instruction: SalesAgentSystemPrompt,
+		Model:       modelLLM,
+		Toolsets: []tool.Toolset{
+			salesMCPToolSet,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Sales agent: %w", err)
+	}
+
 	// ========== Create Root Agent ==========
 	companyInfoTool, err := functiontool.New(
 		functiontool.Config{
@@ -130,6 +164,7 @@ func NewMultiAgentSystem(ctx context.Context) (adkagent.Agent, error) {
 		SubAgents: []adkagent.Agent{
 			hrAgent,
 			salaryAgent,
+			salesAgent,
 		},
 	})
 	if err != nil {
@@ -140,6 +175,7 @@ func NewMultiAgentSystem(ctx context.Context) (adkagent.Agent, error) {
 	log.Printf("  Root Agent: %s", rootAgent.Name())
 	log.Printf("  Sub-Agent 1: %s (HR)", hrAgent.Name())
 	log.Printf("  Sub-Agent 2: %s (Salary)", salaryAgent.Name())
+	log.Printf("  Sub-Agent 3: %s (Sales/MCP)", salesAgent.Name())
 
 	return rootAgent, nil
 }

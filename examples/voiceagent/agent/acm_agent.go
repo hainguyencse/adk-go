@@ -1,17 +1,9 @@
 package agent
 
 import (
-	"context"
 	"fmt"
-	"log"
-	"os"
 
-	adkagent "google.golang.org/adk/agent"
-	adkagentllm "google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
-	"google.golang.org/genai"
 )
 
 // ============================================================
@@ -203,32 +195,6 @@ func getSalaryInfo(ctx tool.Context, input GetSalaryInfoInput) (GetSalaryInfoOut
 
 // ==================== System Prompts ====================
 
-const ACMAgentSystemPrompt = `You are the main assistant for ACM Corporation - a demo company with fictional data.
-
-YOUR JOB: Help users with company, employee, and salary information using the available tools.
-
-TOOLS AVAILABLE:
-- GetCompanyInfo: Get company name, address, and phone number
-- GetEmployeeInfo: Look up employee personal info (name, address, phone) by ID
-- ListEmployees: List all employees in the company
-- GetSalaryInfo: Look up employee salary info by ID
-
-FICTIONAL DATABASE:
-- ACM001: John Nguyen
-- ACM002: Sarah Chen
-- ACM003: Michael Park
-- ACM004: Emily Davis
-
-IMPORTANT: This is a DEMO system with FICTIONAL data. You MUST use the appropriate tools to provide requested information. Always call tools when users ask questions.
-
-HOW TO RESPOND:
-1. Company info → Use GetCompanyInfo
-2. Employee info → Use GetEmployeeInfo with employee ID
-3. List employees → Use ListEmployees
-4. Salary info → Use GetSalaryInfo with employee ID
-
-Be friendly, helpful, and always use tools to get the data!`
-
 // HR Agent System Prompt
 const HRACMAgentSystemPrompt = `You are the HR Assistant for ACM Corporation - a demo company with fictional employee data.
 
@@ -272,12 +238,33 @@ When asked about salary:
 2. Share the salary information returned by the tool
 3. Be friendly and helpful`
 
+// Sales Agent System Prompt
+const SalesAgentSystemPrompt = `You are the Sales+ Assistant for ACM Corporation.
+
+YOUR JOB: Help users look up sales data and user details using the Sales+ (SalesPlus) MCP tools.
+
+TOOLS AVAILABLE (provided by Sales+ MCP server):
+- Get sales information (sales data, sales reports, sales metrics)
+- Get user detail by ID (user profile, user info)
+
+KEYWORD TRIGGERS - You handle any request related to:
+- "sales plus", "sales+", "salesplus", "Sales+"
+- Sales data, sales reports, sales metrics, sales numbers
+- User details, user profile, user info by ID
+
+IMPORTANT: You MUST use the tools to provide the requested information. Always call the appropriate tool when users ask about sales+ or user details.
+
+When asked about sales or user details:
+1. Use the appropriate tool
+2. Share the information returned by the tool
+3. Be friendly and helpful`
+
 // Root Agent System Prompt for Multi-Agent
 const ACMRootAgentSystemPrompt = `You are the main receptionist for ACM Corporation - a demo company.
 
 INTRODUCTION:
 When the user first connects or says hello, briefly introduce yourself and list what you can help with:
-"Welcome to ACM Corporation! I can help you with: company info, employee lookup, employee listing, and salary inquiry. What would you like to know?"
+"Welcome to ACM Corporation! I can help you with: company info, sales plus ERA info lookup, employee listing, and salary inquiry. What would you like to know?"
 
 YOUR JOB:
 1. Answer company information questions directly
@@ -289,100 +276,26 @@ TOOLS AVAILABLE:
 DEPARTMENTS (Sub-Agents):
 - hr_acm_agent: HR department - has tools GetEmployeeInfo (look up employee by ID) and ListEmployees (list all employees)
 - accountant_acm_agent: Accountant department - has tool GetSalaryInfo (look up salary by employee ID)
+- sales_agent: Sales+ (SalesPlus) department - has tools to get sales data and look up user details by ID. Handles anything related to "sales plus", "sales+", "salesplus", sales data, or user details.
 
 HOW TO RESPOND:
 1. Company info questions → Use GetCompanyInfo tool directly
 2. Employee info questions (name, address, phone, list employees) → Transfer to hr_acm_agent
 3. Salary/compensation questions → Transfer to accountant_acm_agent
+4. Sales+/SalesPlus/sales data/user detail questions → Transfer to sales_agent
 
 IMPORTANT:
-- You do NOT have access to employee or salary data
+- You do NOT have access to employee, salary, or sales data
 - You MUST transfer to the appropriate department for those requests
-- Always transfer when users ask about employees or salaries
+- Always transfer when users ask about employees, salaries, sales+, sales plus, sales data, or user details
+- Any mention of "sales plus", "sales+", "salesplus", or "Sales+" MUST go to sales_agent
 
 Example transfers:
 - "Get employee ACM001 info" → Transfer to hr_acm_agent
 - "What is John's salary?" → Transfer to accountant_acm_agent
-- "List all employees" → Transfer to hr_acm_agent`
+- "List all employees" → Transfer to hr_acm_agent
+- "Show me sales data" → Transfer to sales_agent
+- "Get user detail for ID 123" → Transfer to sales_agent
+- "sales plus report" → Transfer to sales_agent
+- "ask sales+" → Transfer to sales_agent`
 
-// ==================== Agent Creation (using AAgent) ====================
-
-// NewACMAgent creates a single ACM agent with all tools
-// This uses a single agent with multiple tools representing different departments
-func NewACMAgent(ctx context.Context) (adkagent.Agent, error) {
-	// Create Company Info tool (Root Agent capability)
-	companyInfoTool, err := functiontool.New(
-		functiontool.Config{
-			Name:        "GetCompanyInfo",
-			Description: "Get ACM Corporation company information including name, address, and phone number",
-		},
-		getCompanyInfo,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create GetCompanyInfo tool: %w", err)
-	}
-
-	// Create Employee Info tool (HR Sub-Agent capability)
-	employeeInfoTool, err := functiontool.New(
-		functiontool.Config{
-			Name:        "GetEmployeeInfo",
-			Description: "Get employee personal information (name, address, phone) by employee ID. This is HR department function.",
-		},
-		getEmployeeInfoACM,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create GetEmployeeInfo tool: %w", err)
-	}
-
-	// Create List Employees tool (HR Sub-Agent capability)
-	listEmployeesTool, err := functiontool.New(
-		functiontool.Config{
-			Name:        "ListEmployees",
-			Description: "List all employees in the company with their basic info. This is HR department function.",
-		},
-		listEmployees,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create ListEmployees tool: %w", err)
-	}
-
-	// Create Salary Info tool (Accountant Sub-Agent capability)
-	salaryInfoTool, err := functiontool.New(
-		functiontool.Config{
-			Name:        "GetSalaryInfo",
-			Description: "Get employee salary information including base salary, bonus, and total. This is Accountant department function.",
-		},
-		getSalaryInfo,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create GetSalaryInfo tool: %w", err)
-	}
-
-	// Create Gemini model
-	modelLLM, err := gemini.NewModel(ctx, "gemini-2.5-flash-native-audio-preview-12-2025", &genai.ClientConfig{
-		APIKey: os.Getenv("GOOGLE_API_KEY"),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create model: %v", err)
-	}
-
-	// Create the ACM Agent with all tools
-	acmAgent, err := adkagentllm.New(adkagentllm.Config{
-		Name:        "acm_agent",
-		Description: "ACM Corporation main assistant - handles company info, employee info (HR), and salary info (Accountant)",
-		Instruction: ACMAgentSystemPrompt,
-		Model:       modelLLM,
-		Tools: []tool.Tool{
-			companyInfoTool,   // Root capability
-			employeeInfoTool,  // HR capability
-			listEmployeesTool, // HR capability
-			salaryInfoTool,    // Accountant capability
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create ACM agent: %w", err)
-	}
-
-	log.Printf("Created ACM Agent: %s", acmAgent.Name())
-	return acmAgent, nil
-}
