@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>HR Voice Agent</title>
+  <title>ERA Voice Agent</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Sora:wght@300;400;500;600&display=swap" rel="stylesheet">
@@ -273,6 +273,126 @@
       color: var(--accent-rose);
     }
 
+    .message.step-complete .message-content {
+      background: rgba(16, 185, 129, 0.12);
+      border: 1px solid rgba(16, 185, 129, 0.4);
+      text-align: center;
+      color: var(--accent-emerald);
+      font-size: 0.85rem;
+      font-weight: 500;
+      max-width: 100%;
+      padding: 10px 16px;
+    }
+
+    .message.transfer .message-content {
+      background: linear-gradient(135deg, rgba(6, 182, 212, 0.12), rgba(139, 92, 246, 0.12));
+      border: 1px solid rgba(6, 182, 212, 0.4);
+      text-align: center;
+      color: var(--accent-cyan);
+      font-size: 0.85rem;
+      font-weight: 500;
+      max-width: 100%;
+      padding: 10px 16px;
+      font-family: 'JetBrains Mono', monospace;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .message.pdf .message-content {
+      background: rgba(244, 63, 94, 0.08);
+      border: 1px solid rgba(244, 63, 94, 0.3);
+      max-width: 100%;
+    }
+
+    .message.pdf .pdf-label {
+      font-size: 0.75rem;
+      color: var(--accent-rose);
+      font-family: 'JetBrains Mono', monospace;
+      margin-bottom: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .message.pdf .pdf-actions {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    .message.pdf .pdf-btn {
+      padding: 8px 16px;
+      border-radius: 8px;
+      border: none;
+      cursor: pointer;
+      font-family: 'Sora', sans-serif;
+      font-size: 0.8rem;
+      font-weight: 500;
+      transition: all 0.2s ease;
+    }
+
+    .message.pdf .pdf-btn-download {
+      background: linear-gradient(135deg, var(--accent-rose), var(--accent-violet));
+      color: white;
+    }
+
+    .message.pdf .pdf-btn-download:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 0 12px rgba(244, 63, 94, 0.3);
+    }
+
+    .message.pdf .pdf-btn-view {
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border-color);
+      color: var(--text-primary);
+    }
+
+    .message.pdf .pdf-btn-view:hover {
+      border-color: var(--accent-cyan);
+    }
+
+    .message.pdf .pdf-viewer {
+      margin-top: 10px;
+      border-radius: 8px;
+      overflow: hidden;
+      border: 1px solid var(--border-color);
+    }
+
+    .message.pdf iframe {
+      width: 100%;
+      height: 500px;
+      border: none;
+      background: white;
+    }
+
+    .message.data .message-content {
+      background: rgba(16, 185, 129, 0.1);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      max-width: 100%;
+    }
+
+    .message.data .data-label {
+      font-size: 0.75rem;
+      color: var(--accent-emerald);
+      font-family: 'JetBrains Mono', monospace;
+      margin-bottom: 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .message.data pre {
+      background: rgba(0, 0, 0, 0.3);
+      border-radius: 8px;
+      padding: 12px;
+      overflow-x: auto;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.8rem;
+      line-height: 1.4;
+      color: var(--text-primary);
+      white-space: pre-wrap;
+      word-break: break-word;
+      margin: 0;
+    }
+
     /* Audio Visualizer */
     .audio-visualizer {
       display: flex;
@@ -489,7 +609,7 @@
       <div class="logo">
         <div class="logo-icon">🎙️</div>
         <div class="logo-text">
-          <h1>HR Voice Agent</h1>
+          <h1>ERA Voice Agent</h1>
           <span>powered by Gemini Live</span>
         </div>
       </div>
@@ -650,13 +770,21 @@
         // JSON text message
         try {
           const data = JSON.parse(event.data);
-          
+
           if (data.error) {
             addErrorMessage(data.error);
+          } else if (data.pdf) {
+            addPdfMessage(data.pdf);
+          } else if (data.transfer) {
+            addTransferMessage(data.transfer);
+          } else if (data.step_complete) {
+            addStepCompleteMessage(data.step_complete);
+          } else if (data.function_response) {
+            // Function response from MCP/tool - show as formatted JSON
+            addDataMessage(data.function_response.name, data.function_response.response);
           } else if (data.text) {
             addAgentMessage(data.text);
           } else if (data.turn_complete) {
-            // Turn completed, could add indicator
             console.log('Turn complete');
           }
         } catch (e) {
@@ -863,7 +991,7 @@
         minute: '2-digit' 
       });
 
-      if (type === 'system' || type === 'error') {
+      if (type === 'system' || type === 'error' || type === 'step-complete' || type === 'transfer') {
         message.innerHTML = `
           <div class="message-content">${content}</div>
         `;
@@ -899,6 +1027,109 @@
 
     function addErrorMessage(text) {
       addMessage('error', '⚠️ ' + text);
+    }
+
+    function addStepCompleteMessage(label) {
+      addMessage('step-complete', '✅ ' + label);
+    }
+
+    function addTransferMessage(agentName) {
+      addMessage('transfer', '🔀 CONNECTING TO ' + agentName + '...');
+    }
+
+    function addPdfMessage(pdfData) {
+      hideEmptyState();
+
+      const message = document.createElement('div');
+      message.className = 'message pdf';
+
+      const time = new Date().toLocaleTimeString('en-US', {
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+
+      const filename = pdfData.filename || 'transaction_summary.pdf';
+
+      // Build blob URL from base64 data, or use direct URL
+      let blobUrl = null;
+      if (pdfData.data) {
+        try {
+          const byteChars = atob(pdfData.data);
+          const byteArray = new Uint8Array(byteChars.length);
+          for (let i = 0; i < byteChars.length; i++) {
+            byteArray[i] = byteChars.charCodeAt(i);
+          }
+          const blob = new Blob([byteArray], { type: 'application/pdf' });
+          blobUrl = URL.createObjectURL(blob);
+        } catch (e) {
+          console.error('Failed to decode PDF base64:', e);
+        }
+      }
+
+      const downloadUrl = blobUrl || pdfData.url || null;
+      const viewerUrl = blobUrl || pdfData.url || null;
+
+      let actionsHtml = '';
+      if (downloadUrl) {
+        actionsHtml += `<a href="${downloadUrl}" download="${escapeHtml(filename)}" class="pdf-btn pdf-btn-download">📥 Download PDF</a>`;
+      }
+      if (viewerUrl) {
+        actionsHtml += `<button class="pdf-btn pdf-btn-view" onclick="this.parentElement.nextElementSibling.style.display = this.parentElement.nextElementSibling.style.display === 'none' ? 'block' : 'none'">👁️ Toggle Preview</button>`;
+      }
+
+      let viewerHtml = '';
+      if (viewerUrl) {
+        viewerHtml = `<div class="pdf-viewer" style="display:none;"><iframe src="${viewerUrl}"></iframe></div>`;
+      }
+
+      if (!downloadUrl && !viewerUrl) {
+        actionsHtml = '<span style="color: var(--text-muted); font-size: 0.8rem;">No PDF data available</span>';
+      }
+
+      message.innerHTML = `
+        <div class="message-header">
+          <div class="message-avatar" style="background: linear-gradient(135deg, var(--accent-rose), var(--accent-violet));">📄</div>
+          <span class="message-author">PDF Export</span>
+          <span class="message-time">${time}</span>
+        </div>
+        <div class="message-content">
+          <div class="pdf-label">${escapeHtml(filename)}</div>
+          <div class="pdf-actions">${actionsHtml}</div>
+          ${viewerHtml}
+        </div>
+      `;
+
+      chatArea.appendChild(message);
+      chatArea.scrollTop = chatArea.scrollHeight;
+    }
+
+    function addDataMessage(toolName, responseData) {
+      hideEmptyState();
+
+      const message = document.createElement('div');
+      message.className = 'message data';
+
+      const time = new Date().toLocaleTimeString('en-US', {
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+
+      const jsonStr = JSON.stringify(responseData, null, 2);
+
+      message.innerHTML = `
+        <div class="message-header">
+          <div class="message-avatar" style="background: linear-gradient(135deg, var(--accent-emerald), var(--accent-cyan));">📊</div>
+          <span class="message-author">Tool Response</span>
+          <span class="message-time">${time}</span>
+        </div>
+        <div class="message-content">
+          <div class="data-label">${escapeHtml(toolName)}</div>
+          <pre>${escapeHtml(jsonStr)}</pre>
+        </div>
+      `;
+
+      chatArea.appendChild(message);
+      chatArea.scrollTop = chatArea.scrollHeight;
     }
 
     function escapeHtml(text) {

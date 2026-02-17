@@ -45,8 +45,12 @@ func New(cfg Config) (agent.Agent, error) {
 	if cfg.AgentConfig.Run != nil {
 		return nil, fmt.Errorf("ParallelAgent doesn't allow custom Run implementations")
 	}
+	if cfg.AgentConfig.RunLive != nil {
+		return nil, fmt.Errorf("ParallelAgent doesn't allow custom RunLive implementations")
+	}
 
 	cfg.AgentConfig.Run = run
+	cfg.AgentConfig.RunLive = runLive
 
 	parallelAgent, err := agent.New(cfg.AgentConfig)
 	if err != nil {
@@ -62,6 +66,12 @@ func New(cfg Config) (agent.Agent, error) {
 	state.Config = cfg
 
 	return parallelAgent, nil
+}
+
+func runLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		yield(nil, fmt.Errorf("RunLive is not supported for ParallelAgent"))
+	}
 }
 
 func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {

@@ -395,7 +395,6 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 					// Run sub-agent on the main goroutine. The iterator function
 					// stays alive, so the caller keeps sending to liveRequestQueue.
 					for ev, err := range nextAgent.RunLive(ctx) {
-						fmt.Printf("nextAgent.RunLive: %v\n", ev)
 						if !yield(ev, err) || err != nil {
 							return
 						}
@@ -403,7 +402,6 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 					break sendLoop
 
 				case liveReq, ok := <-liveRequestQueue.Chan():
-					fmt.Println("liveReq ==>", liveReq)
 					if !ok || liveReq.Close {
 						return
 					}

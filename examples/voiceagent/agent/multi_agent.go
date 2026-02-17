@@ -10,6 +10,7 @@ import (
 
 	adkagent "google.golang.org/adk/agent"
 	adkagentllm "google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
@@ -19,27 +20,13 @@ import (
 
 // ============================================================
 // Multi-Agent System
-// Root: ACMRootAgent - Company info and routing
-// Sub1: HRACMAgent - Employee info (name, address, phone)
-// Sub2: SalaryACMAgent - Employee salary info
-// Sub3: SalesAgent - Sales and user detail info (via MCP server)
+// Root: SALES PLUS AGENT - welcome and routing
+// Sub1: PAAgent - Search Location & Get Transaction Summary By Bedrooms (via MCP server)
 // ============================================================
 
-// ==================== Data Models ====================
-// (Reusing from acm_agent.go)
-
-// ==================== Tool Handlers ====================
-// (Reusing from acm_agent.go)
-
-// ==================== System Prompts ====================
-// (Reusing constants from acm_agent.go)
-
-// ==================== Agent Creation ====================
-
 // NewMultiAgentSystem creates a multi-agent system with:
-// - Root agent: Handles company info and routes to sub-agents
-// - HR sub-agent: Handles employee info
-// - Salary sub-agent: Handles salary info
+// - Root agent: Handles info and routes to sub-agents
+// - PAAgent sub-agent: Search Location & Get Transaction Summary By Bedrooms
 func NewMultiAgentSystem(ctx context.Context) (adkagent.Agent, error) {
 	// Create Gemini model (shared across all agents)
 	modelLLM, err := gemini.NewModel(ctx, "gemini-2.5-flash-native-audio-preview-12-2025", &genai.ClientConfig{
@@ -49,103 +36,136 @@ func NewMultiAgentSystem(ctx context.Context) (adkagent.Agent, error) {
 		return nil, fmt.Errorf("failed to create model: %w", err)
 	}
 
-	// ========== Create HR Sub-Agent ==========
-	employeeInfoTool, err := functiontool.New(
-		functiontool.Config{
-			Name:        "GetEmployeeInfo",
-			Description: "Get employee personal information (name, address, phone) by employee ID. This is HR department function.",
-		},
-		getEmployeeInfoACM,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create GetEmployeeInfo tool: %w", err)
+	// ========== MCP Server ==========
+	salesPlusMCPServer := os.Getenv("SALES_PLUS_MCP")
+	if salesPlusMCPServer == "" {
+		salesPlusMCPServer = "http://localhost:8888"
 	}
 
-	listEmployeesTool, err := functiontool.New(
-		functiontool.Config{
-			Name:        "ListEmployees",
-			Description: "List all employees in the company with their basic info. This is HR department function.",
-		},
-		listEmployees,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create ListEmployees tool: %w", err)
+	salesPlusMCPTransport := &mcp.StreamableClientTransport{
+		Endpoint: fmt.Sprintf("%s/streaming", salesPlusMCPServer),
 	}
 
-	hrAgent, err := adkagentllm.New(adkagentllm.Config{
-		Name:        "hr_acm_agent",
-		Description: "HR department - handles employee personal information (name, address, phone)",
-		Instruction: HRACMAgentSystemPrompt,
-		Model:       modelLLM,
-		Tools: []tool.Tool{
-			employeeInfoTool,
-			listEmployeesTool,
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create HR agent: %w", err)
-	}
-
-	// ========== Create Salary Sub-Agent ==========
-	salaryInfoTool, err := functiontool.New(
-		functiontool.Config{
-			Name:        "GetSalaryInfo",
-			Description: "Get employee salary information including base salary, bonus, and total. This is Accountant department function.",
-		},
-		getSalaryInfo,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create GetSalaryInfo tool: %w", err)
-	}
-
-	salaryAgent, err := adkagentllm.New(adkagentllm.Config{
-		Name:        "accountant_acm_agent",
-		Description: "Accountant department - handles employee salary and compensation information",
-		Instruction: AccountantACMAgentSystemPrompt,
-		Model:       modelLLM,
-		Tools: []tool.Tool{
-			salaryInfoTool,
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create Salary agent: %w", err)
-	}
-
-	// ========== Create Sales Sub-Agent (MCP) ==========
-	salesMCPServer := os.Getenv("SALES_PLUS_MCP")
-	if salesMCPServer == "" {
-		salesMCPServer = "http://localhost:8888"
-	}
-
-	salesMCPTransport := &mcp.StreamableClientTransport{
-		Endpoint: fmt.Sprintf("%s/streaming", salesMCPServer),
-	}
-
-	salesMCPToolSet, err := mcptoolset.New(mcptoolset.Config{
-		Transport: salesMCPTransport,
+	salesPlusMCPToolSet, err := mcptoolset.New(mcptoolset.Config{
+		Transport: salesPlusMCPTransport,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create sales MCP tool set: %w", err)
 	}
 
-	salesAgent, err := adkagentllm.New(adkagentllm.Config{
-		Name:        "sales_agent",
-		Description: "Sales department - handles sales data and user detail lookup by ID (via MCP server)",
-		Instruction: SalesAgentSystemPrompt,
+	// ========== PA Sequential Agent (3 steps) ==========
+
+	// --- Function tools for state management ---
+	confirmProjectTool, err := functiontool.New(
+		functiontool.Config{
+			Name:        "confirm_project",
+			Description: "Confirm the user's project selection and store the projectId for later use",
+		},
+		confirmProject,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create confirm_project tool: %w", err)
+	}
+
+	listDateRangeOptionsTool, err := functiontool.New(
+		functiontool.Config{
+			Name:        "list_date_range_options",
+			Description: "List available date range options for transaction analysis",
+		},
+		listDateRangeOptions,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create list_date_range_options tool: %w", err)
+	}
+
+	confirmDateRangeTool, err := functiontool.New(
+		functiontool.Config{
+			Name:        "confirm_date_range",
+			Description: "Confirm the user's date range selection and store it for later use",
+		},
+		confirmDateRange,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create confirm_date_range tool: %w", err)
+	}
+
+	getAnalysisParamsTool, err := functiontool.New(
+		functiontool.Config{
+			Name:        "get_analysis_params",
+			Description: "Retrieve the selected projectId and contractDateRangeType from previous steps",
+		},
+		getAnalysisParams,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create get_analysis_params tool: %w", err)
+	}
+
+	// Step 1: Search Location Agent (MCP search + confirm_project)
+	searchLocationAgent, err := adkagentllm.New(adkagentllm.Config{
+		Name:        "search_location_agent",
+		Description: "Search for property locations/projects by keyword",
+		Instruction: SearchLocationAgentPrompt,
 		Model:       modelLLM,
+		Tools: []tool.Tool{
+			confirmProjectTool,
+		},
 		Toolsets: []tool.Toolset{
-			salesMCPToolSet,
+			salesPlusMCPToolSet,
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Sales agent: %w", err)
+		return nil, fmt.Errorf("failed to create search location agent: %w", err)
+	}
+
+	// Step 2: Date Range Selection Agent (list options + confirm selection)
+	dateRangeAgent, err := adkagentllm.New(adkagentllm.Config{
+		Name:        "date_range_agent",
+		Description: "Select date range type for transaction analysis (1y, 3y, 5y, 10y)",
+		Instruction: DateRangeAgentPrompt,
+		Model:       modelLLM,
+		Tools: []tool.Tool{
+			listDateRangeOptionsTool,
+			confirmDateRangeTool,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create date range agent: %w", err)
+	}
+
+	// Step 3: Transaction Summary Agent (get params from state + MCP call)
+	transactionSummaryAgent, err := adkagentllm.New(adkagentllm.Config{
+		Name:        "transaction_summary_agent",
+		Description: "Get project transaction summary breakdowns by bedrooms",
+		Instruction: TransactionSummaryAgentPrompt,
+		Model:       modelLLM,
+		Tools: []tool.Tool{
+			getAnalysisParamsTool,
+		},
+		Toolsets: []tool.Toolset{
+			salesPlusMCPToolSet,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create transaction summary agent: %w", err)
+	}
+
+	// PA Agent: sequential workflow (search -> date range -> transaction summary -> export PDF)
+	paAgent, err := sequentialagent.New(sequentialagent.Config{
+		AgentConfig: adkagent.Config{
+			Name:        "pa_agent",
+			Description: "Property Analysis - sequential workflow: search location, select date range, get transaction summary",
+			SubAgents:   []adkagent.Agent{searchLocationAgent, dateRangeAgent, transactionSummaryAgent},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create PA agent: %w", err)
 	}
 
 	// ========== Create Root Agent ==========
 	companyInfoTool, err := functiontool.New(
 		functiontool.Config{
 			Name:        "GetCompanyInfo",
-			Description: "Get ACM Corporation company information including name, address, and phone number",
+			Description: "ERA Singapore is one of the leading real estate agencies in Singapore, providing comprehensive property services including residential, commercial, and project marketing",
 		},
 		getCompanyInfo,
 	)
@@ -153,18 +173,28 @@ func NewMultiAgentSystem(ctx context.Context) (adkagent.Agent, error) {
 		return nil, fmt.Errorf("failed to create GetCompanyInfo tool: %w", err)
 	}
 
+	listCapabilitiesTool, err := functiontool.New(
+		functiontool.Config{
+			Name:        "list_capabilities",
+			Description: "Display the list of available services/capabilities in the chatbox for the user to read",
+		},
+		listCapabilities,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create list_capabilities tool: %w", err)
+	}
+
 	rootAgent, err := adkagentllm.New(adkagentllm.Config{
-		Name:        "acm_root_agent",
-		Description: "Main receptionist for ACM Corporation - handles company info and routes to HR or Accountant departments",
-		Instruction: ACMRootAgentSystemPrompt,
+		Name:        "root_agent",
+		Description: "Main for ERA Singapore - handles company info and routes to PA or Sales departments",
+		Instruction: ERARootAgentSystemPrompt,
 		Model:       modelLLM,
 		Tools: []tool.Tool{
 			companyInfoTool,
+			listCapabilitiesTool,
 		},
 		SubAgents: []adkagent.Agent{
-			hrAgent,
-			salaryAgent,
-			salesAgent,
+			paAgent,
 		},
 	})
 	if err != nil {
@@ -173,9 +203,10 @@ func NewMultiAgentSystem(ctx context.Context) (adkagent.Agent, error) {
 
 	log.Printf("Created Multi-Agent System:")
 	log.Printf("  Root Agent: %s", rootAgent.Name())
-	log.Printf("  Sub-Agent 1: %s (HR)", hrAgent.Name())
-	log.Printf("  Sub-Agent 2: %s (Salary)", salaryAgent.Name())
-	log.Printf("  Sub-Agent 3: %s (Sales/MCP)", salesAgent.Name())
+	log.Printf("  Sub-Agent: %s (PA Sequential)", paAgent.Name())
+	log.Printf("    Step 1: %s (Search Location)", searchLocationAgent.Name())
+	log.Printf("    Step 2: %s (Date Range)", dateRangeAgent.Name())
+	log.Printf("    Step 3: %s (Transaction Summary)", transactionSummaryAgent.Name())
 
 	return rootAgent, nil
 }
