@@ -298,28 +298,63 @@
       letter-spacing: 0.05em;
     }
 
-    .message.pdf .message-content {
-      background: rgba(244, 63, 94, 0.08);
-      border: 1px solid rgba(244, 63, 94, 0.3);
+    .message.sections .message-content {
+      background: rgba(139, 92, 246, 0.08);
+      border: 1px solid rgba(139, 92, 246, 0.3);
       max-width: 100%;
     }
 
-    .message.pdf .pdf-label {
+    .message.sections .sections-label {
       font-size: 0.75rem;
-      color: var(--accent-rose);
+      color: var(--accent-violet);
       font-family: 'JetBrains Mono', monospace;
-      margin-bottom: 10px;
+      margin-bottom: 6px;
       text-transform: uppercase;
       letter-spacing: 0.05em;
     }
 
-    .message.pdf .pdf-actions {
-      display: flex;
-      gap: 10px;
-      margin-bottom: 10px;
+    .message.sections .sections-hint {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      margin-bottom: 12px;
     }
 
-    .message.pdf .pdf-btn {
+    .message.sections .sections-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+
+    .message.sections .section-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      background: rgba(0, 0, 0, 0.2);
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background 0.15s ease;
+      font-size: 0.85rem;
+    }
+
+    .message.sections .section-item:hover {
+      background: rgba(139, 92, 246, 0.12);
+    }
+
+    .message.sections .section-item input[type="checkbox"] {
+      accent-color: var(--accent-violet);
+      width: 16px;
+      height: 16px;
+    }
+
+    .message.sections .sections-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .message.sections .sections-btn {
       padding: 8px 16px;
       border-radius: 8px;
       border: none;
@@ -330,38 +365,59 @@
       transition: all 0.2s ease;
     }
 
-    .message.pdf .pdf-btn-download {
-      background: linear-gradient(135deg, var(--accent-rose), var(--accent-violet));
-      color: white;
+    .message.sections .sections-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
     }
 
-    .message.pdf .pdf-btn-download:hover {
-      transform: translateY(-1px);
-      box-shadow: 0 0 12px rgba(244, 63, 94, 0.3);
-    }
-
-    .message.pdf .pdf-btn-view {
+    .message.sections .sections-btn-all,
+    .message.sections .sections-btn-none {
       background: var(--bg-tertiary);
       border: 1px solid var(--border-color);
       color: var(--text-primary);
     }
 
-    .message.pdf .pdf-btn-view:hover {
-      border-color: var(--accent-cyan);
+    .message.sections .sections-btn-confirm {
+      background: linear-gradient(135deg, var(--accent-violet), var(--accent-cyan));
+      color: white;
     }
 
-    .message.pdf .pdf-viewer {
-      margin-top: 10px;
+    .message.sections .sections-btn-confirm:hover:not(:disabled) {
+      transform: translateY(-1px);
+      box-shadow: var(--glow-violet);
+    }
+
+    .message.report-link .message-content {
+      background: rgba(16, 185, 129, 0.08);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      max-width: 100%;
+    }
+
+    .message.report-link .report-label {
+      font-size: 0.75rem;
+      color: var(--accent-emerald);
+      font-family: 'JetBrains Mono', monospace;
+      margin-bottom: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .message.report-link .report-download-btn {
+      display: inline-block;
+      padding: 10px 20px;
       border-radius: 8px;
-      overflow: hidden;
-      border: 1px solid var(--border-color);
+      background: linear-gradient(135deg, var(--accent-emerald), var(--accent-cyan));
+      color: white;
+      text-decoration: none;
+      font-family: 'Sora', sans-serif;
+      font-size: 0.85rem;
+      font-weight: 500;
+      transition: all 0.2s ease;
     }
 
-    .message.pdf iframe {
-      width: 100%;
-      height: 500px;
-      border: none;
-      background: white;
+    .message.report-link .report-download-btn:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 0 12px rgba(16, 185, 129, 0.3);
     }
 
     .message.data .message-content {
@@ -773,15 +829,12 @@
 
           if (data.error) {
             addErrorMessage(data.error);
-          } else if (data.pdf) {
-            addPdfMessage(data.pdf);
-          } else if (data.transfer) {
-            addTransferMessage(data.transfer);
-          } else if (data.step_complete) {
-            addStepCompleteMessage(data.step_complete);
           } else if (data.function_response) {
-            // Function response from MCP/tool - show as formatted JSON
-            addDataMessage(data.function_response.name, data.function_response.response);
+            if (data.function_response.name === 'list_property_report_section_options') {
+              addSectionsMessage(data.function_response.response);
+            } else {
+              addDataMessage(data.function_response.name, data.function_response.response);
+            }
           } else if (data.text) {
             addAgentMessage(data.text);
           } else if (data.turn_complete) {
@@ -1029,78 +1082,82 @@
       addMessage('error', '⚠️ ' + text);
     }
 
-    function addStepCompleteMessage(label) {
-      addMessage('step-complete', '✅ ' + label);
-    }
-
-    function addTransferMessage(agentName) {
-      addMessage('transfer', '🔀 CONNECTING TO ' + agentName + '...');
-    }
-
-    function addPdfMessage(pdfData) {
+    function addSectionsMessage(responseData) {
       hideEmptyState();
 
       const message = document.createElement('div');
-      message.className = 'message pdf';
+      message.className = 'message sections';
 
-      const time = new Date().toLocaleTimeString('en-US', {
-        hour: '2-digit',
-        minute: '2-digit'
-      });
-
-      const filename = pdfData.filename || 'transaction_summary.pdf';
-
-      // Build blob URL from base64 data, or use direct URL
-      let blobUrl = null;
-      if (pdfData.data) {
-        try {
-          const byteChars = atob(pdfData.data);
-          const byteArray = new Uint8Array(byteChars.length);
-          for (let i = 0; i < byteChars.length; i++) {
-            byteArray[i] = byteChars.charCodeAt(i);
-          }
-          const blob = new Blob([byteArray], { type: 'application/pdf' });
-          blobUrl = URL.createObjectURL(blob);
-        } catch (e) {
-          console.error('Failed to decode PDF base64:', e);
+      // Extract sections from MCP response
+      let sections = [];
+      if (responseData && responseData.output) {
+        if (typeof responseData.output === 'string') {
+          try { sections = JSON.parse(responseData.output); } catch(e) {}
+        } else if (Array.isArray(responseData.output)) {
+          sections = responseData.output;
+        } else if (responseData.output.sections) {
+          sections = responseData.output.sections;
         }
+      } else if (Array.isArray(responseData)) {
+        sections = responseData;
       }
 
-      const downloadUrl = blobUrl || pdfData.url || null;
-      const viewerUrl = blobUrl || pdfData.url || null;
-
-      let actionsHtml = '';
-      if (downloadUrl) {
-        actionsHtml += `<a href="${downloadUrl}" download="${escapeHtml(filename)}" class="pdf-btn pdf-btn-download">📥 Download PDF</a>`;
-      }
-      if (viewerUrl) {
-        actionsHtml += `<button class="pdf-btn pdf-btn-view" onclick="this.parentElement.nextElementSibling.style.display = this.parentElement.nextElementSibling.style.display === 'none' ? 'block' : 'none'">👁️ Toggle Preview</button>`;
-      }
-
-      let viewerHtml = '';
-      if (viewerUrl) {
-        viewerHtml = `<div class="pdf-viewer" style="display:none;"><iframe src="${viewerUrl}"></iframe></div>`;
-      }
-
-      if (!downloadUrl && !viewerUrl) {
-        actionsHtml = '<span style="color: var(--text-muted); font-size: 0.8rem;">No PDF data available</span>';
-      }
+      const checkboxesHtml = sections.map((s) => {
+        const name = typeof s === 'string' ? s : (s.name || s.sectionName || JSON.stringify(s));
+        return `<label class="section-item">
+          <input type="checkbox" value="${escapeHtml(name)}" checked />
+          <span>${escapeHtml(name)}</span>
+        </label>`;
+      }).join('');
 
       message.innerHTML = `
         <div class="message-header">
-          <div class="message-avatar" style="background: linear-gradient(135deg, var(--accent-rose), var(--accent-violet));">📄</div>
-          <span class="message-author">PDF Export</span>
-          <span class="message-time">${time}</span>
+          <div class="message-avatar" style="background: linear-gradient(135deg, var(--accent-violet), var(--accent-cyan));">📋</div>
+          <span class="message-author">Section Selection</span>
         </div>
         <div class="message-content">
-          <div class="pdf-label">${escapeHtml(filename)}</div>
-          <div class="pdf-actions">${actionsHtml}</div>
-          ${viewerHtml}
+          <div class="sections-label">SELECT REPORT SECTIONS</div>
+          <div class="sections-hint">All sections selected by default. Uncheck to exclude.</div>
+          <div class="sections-list">${checkboxesHtml}</div>
+          <div class="sections-actions">
+            <button class="sections-btn sections-btn-all" onclick="toggleAllSections(this, true)">Select All</button>
+            <button class="sections-btn sections-btn-none" onclick="toggleAllSections(this, false)">Deselect All</button>
+            <button class="sections-btn sections-btn-confirm" onclick="confirmSections(this)">Confirm Selection</button>
+          </div>
         </div>
       `;
 
       chatArea.appendChild(message);
       chatArea.scrollTop = chatArea.scrollHeight;
+    }
+
+    function toggleAllSections(btn, checked) {
+      const container = btn.closest('.message-content');
+      container.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = checked);
+    }
+
+    function confirmSections(btn) {
+      const container = btn.closest('.message-content');
+      const selected = [];
+      container.querySelectorAll('input[type="checkbox"]:checked').forEach(cb => {
+        selected.push(cb.value);
+      });
+
+      if (selected.length === 0) {
+        alert('Please select at least one section');
+        return;
+      }
+
+      // Send selection as text message
+      const msg = 'Selected sections: ' + selected.join(', ');
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(msg);
+        addUserMessage(msg);
+      }
+
+      // Disable the form
+      container.querySelectorAll('input, button').forEach(el => el.disabled = true);
+      btn.textContent = 'Confirmed';
     }
 
     function addDataMessage(toolName, responseData) {
