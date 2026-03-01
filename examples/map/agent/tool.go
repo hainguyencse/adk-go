@@ -38,7 +38,7 @@ func searchLocation(ctx tool.Context, input searchLocationInput) (searchLocation
 	}
 
 	var mapRequest MapRequest
-	val, err := ctx.State().Get(sessionStateKeyMapRequest)
+	val, err := ctx.State().Get(SessionStateKeyMapRequest)
 	if err == nil {
 		mapRequest, _ = val.(MapRequest)
 	}
@@ -47,7 +47,7 @@ func searchLocation(ctx tool.Context, input searchLocationInput) (searchLocation
 	mapRequest.LocationType = input.LocationType
 	mapRequest.Radius = radius
 
-	ctx.State().Set(sessionStateKeyMapRequest, mapRequest)
+	ctx.State().Set(SessionStateKeyMapRequest, mapRequest)
 	return searchLocationOutput{}, nil
 }
 
@@ -81,7 +81,7 @@ func filterProject(ctx tool.Context, input filterProjectInput) (filterProjectOut
 	fmt.Println("filterProject run")
 
 	var mapRequest MapRequest
-	val, err := ctx.State().Get(sessionStateKeyMapRequest)
+	val, err := ctx.State().Get(SessionStateKeyMapRequest)
 	if err == nil {
 		mapRequest, _ = val.(MapRequest)
 	}
@@ -117,41 +117,8 @@ func filterProject(ctx tool.Context, input filterProjectInput) (filterProjectOut
 		}
 	}
 
-	ctx.State().Set(sessionStateKeyMapRequest, mapRequest)
+	ctx.State().Set(SessionStateKeyMapRequest, mapRequest)
 	return filterProjectOutput{}, nil
-}
-
-func newUpdateMapTool() (tool.Tool, error) {
-	funcTool, err := functiontool.New(
-		functiontool.Config{
-			Name:        "update_map",
-			Description: "Update Map in MAP+",
-		},
-		updateMap,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create update_map tool: %w", err)
-	}
-
-	return funcTool, nil
-}
-
-func updateMap(ctx tool.Context, input updateMapInput) (updateMapOutput, error) {
-	fmt.Println("updateMap run")
-
-	var mapRequest MapRequest
-	val, err := ctx.State().Get(sessionStateKeyMapRequest)
-	if err == nil {
-		mapRequest, _ = val.(MapRequest)
-	}
-
-	mapResponse, err := searchProjectsInMap(mapRequest)
-	if err != nil {
-		return updateMapOutput{}, nil
-	}
-
-	count := len(mapResponse.Data)
-	return updateMapOutput{Count: fmt.Sprintf("%d", count)}, nil
 }
 
 func newZoomMapTool() (tool.Tool, error) {
@@ -171,7 +138,7 @@ func newZoomMapTool() (tool.Tool, error) {
 
 func zoomMap(ctx tool.Context, input zoomMapInput) (zoomMapOutput, error) {
 	var mapRequest MapRequest
-	val, err := ctx.State().Get(sessionStateKeyMapRequest)
+	val, err := ctx.State().Get(SessionStateKeyMapRequest)
 	if err == nil {
 		mapRequest, _ = val.(MapRequest)
 	}
@@ -183,7 +150,7 @@ func zoomMap(ctx tool.Context, input zoomMapInput) (zoomMapOutput, error) {
 	}
 
 	mapRequest.ZoomLevel = zoomLevel
-	ctx.State().Set(sessionStateKeyMapRequest, mapRequest)
+	ctx.State().Set(SessionStateKeyMapRequest, mapRequest)
 
 	return zoomMapOutput{}, nil
 }
@@ -222,23 +189,30 @@ func newExecuteMapQueryTool() (tool.Tool, error) {
 	return funcTool, nil
 }
 
-func executeMapQuery(ctx tool.Context, input mapQueryInput) (mapQueryOutput, error) {
+func executeMapQuery(ctx tool.Context, input mapQueryInput) (MapQueryOutput, error) {
 	log.Printf("executeMapQuery run: %+v\n", input)
 
 	var mapRequest MapRequest
-	val, err := ctx.State().Get(sessionStateKeyMapRequest)
+	val, err := ctx.State().Get(SessionStateKeyMapRequest)
 	if err == nil {
 		mapRequest, _ = val.(MapRequest)
 	}
 
-	// Update location only if keyword is provided
+	// Search location
 	if input.Keyword != "" {
 		locationIDs, _ := searchLocationByKeyword(ctx, input.Keyword, input.LocationType)
 		mapRequest.LocationIDs = locationIDs
 		mapRequest.LocationType = input.LocationType
+		mapRequest.Keyword = input.Keyword
+	} else {
+		mapRequest.LocationIDs = nil
+		mapRequest.LocationType = "anywhere"
+		mapRequest.Keyword = ""
 	}
 
-	// Update radius if provided
+	log.Printf("mapRequest.LocationIDs: %v\n", mapRequest.LocationIDs)
+
+	// Update radius only if explicitly provided; otherwise keep existing or use default
 	if input.Radius != "" {
 		radius, err := strconv.Atoi(input.Radius)
 		if err != nil || radius < 1000 {
@@ -248,12 +222,11 @@ func executeMapQuery(ctx tool.Context, input mapQueryInput) (mapQueryOutput, err
 			radius = 4000
 		}
 		mapRequest.Radius = radius
-	}
-	if mapRequest.Radius == 0 {
+	} else if mapRequest.Radius == 0 {
 		mapRequest.Radius = defaultSearchLocationRadius
 	}
 
-	// Update bedroom filter if provided
+	// Update bedroom filter only if provided; otherwise preserve existing
 	if input.NumberOfBedrooms != "" {
 		mapUnitBedroomTypes := map[string]string{
 			"1": "1_bedroom",
@@ -262,8 +235,8 @@ func executeMapQuery(ctx tool.Context, input mapQueryInput) (mapQueryOutput, err
 			"4": "4_bedrooms",
 			"5": "5_bedrooms",
 		}
-		if v, ok := mapUnitBedroomTypes[input.NumberOfBedrooms]; ok {
-			mapRequest.UnitBedroomTypes = []string{v}
+		if val, _ := mapUnitBedroomTypes[input.NumberOfBedrooms]; val != "" {
+			mapRequest.UnitBedroomTypes = []string{val}
 		}
 	}
 
@@ -280,15 +253,8 @@ func executeMapQuery(ctx tool.Context, input mapQueryInput) (mapQueryOutput, err
 		}
 	}
 
-	ctx.State().Set(sessionStateKeyMapRequest, mapRequest)
+	ctx.State().Set(SessionStateKeyMapRequest, mapRequest)
 
-	mapResponse, err := searchProjectsInMap(mapRequest)
-	if err != nil {
-		fmt.Printf("executeMapQuery error: %v\n", err)
-		return mapQueryOutput{Count: "0"}, nil
-	}
-
-	count := len(mapResponse.Data)
-	log.Printf("executeMapQuery found %d projects\n", count)
-	return mapQueryOutput{Count: fmt.Sprintf("%d", count)}, nil
+	resp := mapRequest.ToMapQueryOutput()
+	return resp, nil
 }

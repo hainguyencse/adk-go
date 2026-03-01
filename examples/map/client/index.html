@@ -787,7 +787,7 @@
           if (data.error) {
             addErrorMessage(data.error);
           } else if (data.eventType === 'map_update') {
-            addMapUpdateMessage(data.mapResponse);
+            addMapUpdateMessage(data.mapUpdateRequest, data.mapUpdateResponse);
           } else if (data.text) {
             addAgentMessage(data.text);
           } else if (data.turnComplete) {
@@ -1064,7 +1064,7 @@
       chatArea.scrollTop = chatArea.scrollHeight;
     }
 
-    function addMapUpdateMessage(mapResponse) {
+    function addMapUpdateMessage(req, resp) {
       hideEmptyState();
 
       const message = document.createElement('div');
@@ -1075,29 +1075,39 @@
         minute: '2-digit'
       });
 
-      const items = (mapResponse && mapResponse.data) ? mapResponse.data : [];
+      // Build summary line: Near: <type> <keyword>, Radius: <r>, <BR>, <txn>
+      const parts = [];
 
-      const listId = 'map-list-' + Date.now();
+      const locationTypeLabel = {
+        mrt_station: 'MRT', district: 'District',
+        estate: 'Estate', primary_school: 'Primary School',
+      };
+      const locType = req && req.locationType && req.locationType !== 'anywhere'
+        ? (locationTypeLabel[req.locationType] || req.locationType)
+        : 'Anywhere';
+      const locKeyword = req && req.keyword ? ` ${req.keyword}` : '';
+      parts.push(`Near: ${locType}${locKeyword}`);
 
-      const itemsHtml = items.length === 0
-        ? `<div class="map-empty">No projects found</div>`
-        : items.map(item => {
-            const loc = item.location || {};
-            const id = loc.id != null ? loc.id : '—';
-            const name = loc.name || '—';
-            return `
-              <div class="map-item">
-                <span class="map-item-id">#${escapeHtml(String(id))}</span>
-                <span class="map-item-name">${escapeHtml(name)}</span>
-              </div>`;
-          }).join('');
+      if (req && req.radius) {
+        const km = req.radius >= 1000 ? (req.radius / 1000) + 'km' : req.radius + 'm';
+        parts.push(`Radius: ${km}`);
+      }
 
-      const toggleLabel = items.length === 0 ? '' : `
-        <button class="map-toggle" onclick="
-          const list = document.getElementById('${listId}');
-          const expanded = list.classList.toggle('expanded');
-          this.textContent = expanded ? '▲ collapse' : '▼ expand';
-        ">▼ expand</button>`;
+      if (req && req.unitBedroomTypes && req.unitBedroomTypes.length > 0) {
+        const brLabel = {
+          '1_bedroom': '1BR', '2_bedrooms': '2BR', '3_bedrooms': '3BR',
+          '4_bedrooms': '4BR', '5_bedrooms': '5BR',
+        }[req.unitBedroomTypes[0]] || req.unitBedroomTypes[0];
+        parts.push(brLabel);
+      }
+
+      if (req && req.isNewLaunch) {
+        parts.push('New Launch');
+      }
+
+      if (req && req.transactionDateRange) {
+        parts.push(`Txn: ${req.transactionDateRange}`);
+      }
 
       message.innerHTML = `
         <div class="message-header">
@@ -1106,9 +1116,9 @@
           <span class="message-time">${time}</span>
         </div>
         <div class="message-content">
-          <div class="map-label">MAP UPDATE</div>
-          <div class="map-count">${items.length} project${items.length !== 1 ? 's' : ''} found ${toggleLabel}</div>
-          <div class="map-list" id="${listId}">${itemsHtml}</div>
+          <div class="map-label">Map Query:</div>
+          <div style="margin-top:4px;font-size:0.9rem;color:var(--text-primary);">${escapeHtml(parts.join(', '))}</div>
+          <div style="margin-top:6px;font-size:0.9rem;color:var(--text-secondary);">${resp && resp.count > 0 ? `Found: ${resp.count} locations.` : 'Not found any location'}</div>
         </div>
       `;
 

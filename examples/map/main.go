@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -235,40 +238,31 @@ func (s *Server) downstreamTask(
 						}
 					}
 
-					// Text -> send as JSON to chatbox
-					if part.Text != "" {
-						resp := EventResponse{
-							Author: event.Author,
-							Text:   part.Text,
-						}
-						data, _ := json.Marshal(resp)
-						if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
-							log.Printf("Failed to send text: %v", err)
-							return
-						}
-					}
-
 					// Function response -> send as JSON to chatbox
 					if part.FunctionResponse != nil {
-						if part.FunctionResponse.Name == "update_map" {
-							fmt.Println("Func Response update_map")
+						if part.FunctionResponse.Name == "execute_map_query" {
+							var output mapagent.MapQueryOutput
+							if b, err := json.Marshal(part.FunctionResponse.Response); err == nil {
+								json.Unmarshal(b, &output)
+							}
 
-							// var mapResponse mapagent.MapResponse
-							// if raw, err := json.Marshal(part.FunctionResponse.Response); err == nil {
-							// 	json.Unmarshal(raw, &mapResponse)
-							// }
+							mapUpdateRequest := newMapUpdateRequestFromMapQueryOutput(&output)
 
-							// resp := EventResponse{
-							// 	Author:      event.Author,
-							// 	EventType:   EventTypeMapUpdate,
-							// 	MapResponse: &mapResponse,
-							// }
+							log.Printf("mapUpdateRequest: %v\n", mapUpdateRequest)
+							mapUpdateRespose, _ := searchProjectsInMap(mapUpdateRequest)
 
-							// data, _ := json.Marshal(resp)
-							// if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
-							// 	log.Printf("Failed to send function response: %v", err)
-							// 	return
-							// }
+							resp := EventResponse{
+								Author:            event.Author,
+								EventType:         EventTypeMapUpdate,
+								MapUpdateRequest:  mapUpdateRequest,
+								MapUpdateResponse: mapUpdateRespose,
+							}
+
+							data, _ := json.Marshal(resp)
+							if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+								log.Printf("Failed to send event: %v", err)
+								return
+							}
 						}
 
 						if part.FunctionResponse.Name != "" {
@@ -318,46 +312,19 @@ func (s *Server) downstreamTask(
 	}
 }
 
-type MapLocationType string
-
-const (
-	MapLocationTypeMarketSegment MapLocationType = "market_segment"
-	MapLocationTypeEstate        MapLocationType = "estate"
-	MapLocationTypeDistrict      MapLocationType = "district"
-	MapLocationTypeStreet        MapLocationType = "street"
-
-	// "locationIDs": [
-	//     133,
-	//     28
-	// ],
-	MapLocationTypeMRTStation MapLocationType = "mrt_station"
-
-	// "locationIDs": [
-	//   1
-	// ],
-	MapLocationTypeSchool   MapLocationType = "school"
-	MapLocationTypeProject  MapLocationType = "project"
-	MapLocationTypeProperty MapLocationType = "property"
-
-	// "locationIDs": [
-	//     {
-	//       "longitude": 106.77860050459809,
-	//       "latitude": 10.81392632082483
-	//     }
-	// ],
-	MapLocationTypeGeoPoint MapLocationType = "geo_point"
-)
-
 type EventResponse struct {
-	Author    string    `json:"author"`
-	EventType EventType `json:"eventType"`
-
-	Text        string                `json:"text,omitempty"`
-	MapResponse *mapagent.MapResponse `json:"mapResponse,omitempty"`
-
+	Author       string `json:"author"`
+	Text         string `json:"text,omitempty"`
 	TurnComplete bool   `json:"turnComplete"`
 	Interrupted  bool   `json:"interrupted"`
 	Error        string `json:"error,omitempty"`
+
+	EventType EventType `json:"eventType"`
+
+	// MapUpdateRequest return when EventType = map_update
+	// MapUpdateRequest return request payload base on user voice - Client use new request to call api - reload data in map
+	MapUpdateRequest  *MapUpdateRequest  `json:"mapUpdateRequest,omitempty"`
+	MapUpdateResponse *MapUpdateResponse `json:"mapUpdateResponse,omitempty"`
 }
 
 type EventType string
@@ -370,8 +337,160 @@ const (
 	EventTypeExportPDf EventType = "export_pdf"
 )
 
+type MapUpdateRequest struct {
+	LocationIDs          []string `json:"locationIDs"`
+	LocationType         string   `json:"locationType"`
+	Keyword              string   `json:"keyword"`
+	Radius               int      `json:"radius"`
+	IsNewLaunch          bool     `json:"isNewLaunch"`
+	UnitBedroomTypes     []string `json:"unitBedroomTypes"`
+	TransactionDateRange string   `json:"transactionDateRange"`
+	ZoomLevel            int      `json:"zoomLevel"`
+}
+
+func newMapUpdateRequestFromMapQueryOutput(output *mapagent.MapQueryOutput) *MapUpdateRequest {
+	req := &MapUpdateRequest{
+		LocationType:         output.LocationType,
+		Keyword:              output.Keyword,
+		TransactionDateRange: output.TransactionDateRange,
+		IsNewLaunch:          output.IsNewLaunch == "newLaunch",
+	}
+
+	if output.LocationIDs != "" {
+		req.LocationIDs = strings.Split(output.LocationIDs, ",")
+	}
+
+	if output.UnitBedroomTypes != "" {
+		req.UnitBedroomTypes = strings.Split(output.UnitBedroomTypes, ",")
+	}
+
+	if r, err := strconv.Atoi(output.Radius); err == nil {
+		req.Radius = r
+	}
+
+	if z, err := strconv.Atoi(output.ZoomLevel); err == nil {
+		req.ZoomLevel = z
+	}
+
+	return req
+}
+
+type MapUpdateResponse struct {
+	Count int `json:"count"`
+}
+
 func sendError(conn *websocket.Conn, message string) {
 	resp := EventResponse{Error: message}
 	data, _ := json.Marshal(resp)
 	conn.WriteMessage(websocket.TextMessage, data)
+}
+
+func searchProjectsInMap(mapRequest *MapUpdateRequest) (*MapUpdateResponse, error) {
+	baseUrl := os.Getenv("BASE_URL")
+
+	reqBody := map[string]any{
+		"selectedLocation": map[string]any{
+			"locationType": "anywhere",
+		},
+		"rentalTransactionFilter": map[string]any{
+			"contractDateRangeType": mapRequest.TransactionDateRange,
+		},
+		"propertyFilter": map[string]any{
+			"propertyType":       "Condo",
+			"unitBedroomTypes":   mapRequest.UnitBedroomTypes,
+			"isNewLaunchProject": mapRequest.IsNewLaunch,
+		},
+		"saleTransactionFilter": map[string]any{
+			"contractDateRangeType": mapRequest.TransactionDateRange,
+		},
+		"expectedLocationType": "project",
+		"pageSize":             20,
+		"page":                 1,
+		"sortOrder":            "desc",
+	}
+
+	fmt.Printf("searchProjectsInMap LocationIDs: %v", mapRequest.LocationIDs)
+	fmt.Printf("searchProjectsInMap LocationType: %v", mapRequest.LocationType)
+
+	if len(mapRequest.LocationIDs) > 0 && mapRequest.LocationType != "" {
+		if mapRequest.LocationType == "primary_school" {
+			// mapRequest.LocationIDs []string to []int
+			locationIDs, _ := stringSliceToIntSlice(mapRequest.LocationIDs)
+
+			reqBody["selectedLocation"] = map[string]any{
+				"locationIDs":  locationIDs,
+				"locationType": "school",
+				"radius":       mapRequest.Radius,
+			}
+		}
+
+	}
+
+	if mapRequest.TransactionDateRange != "" {
+		reqBody["rentalTransactionFilter"] = map[string]any{
+			"contractDateRangeType": mapRequest.TransactionDateRange,
+		}
+
+		reqBody["saleTransactionFilter"] = map[string]any{
+			"contractDateRangeType": mapRequest.TransactionDateRange,
+		}
+	}
+
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+	log.Printf("reqBody ==> %s", bodyBytes)
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+		baseUrl+"/api/property-analysis/search", bytes.NewBuffer(bodyBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Basic "+os.Getenv("API_TOKEN"))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call property-analysis API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var rawResp struct {
+		Data []struct {
+			Location struct {
+				Location struct {
+					ID           int    `json:"id"`
+					Name         string `json:"name"`
+					PropertyType string `json:"propertyType"`
+					District     string `json:"district"`
+				} `json:"location"`
+			} `json:"location"`
+		} `json:"data"`
+		TotalCount int `json:"totalCount"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rawResp); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	result := &MapUpdateResponse{
+		Count: rawResp.TotalCount,
+	}
+
+	return result, nil
+}
+
+func stringSliceToIntSlice(input []string) ([]int, error) {
+	result := make([]int, len(input))
+
+	for i, v := range input {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, err
+		}
+		result[i] = n
+	}
+
+	return result, nil
 }
