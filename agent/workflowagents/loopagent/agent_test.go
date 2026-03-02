@@ -338,6 +338,10 @@ func (f *FakeLLM) Name() string {
 	return "fake-llm"
 }
 
+func (f *FakeLLM) Connect(ctx context.Context, req *model.LLMRequest) (*genai.Session, error) {
+	return nil, nil
+}
+
 func (f *FakeLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		f.callCounter++

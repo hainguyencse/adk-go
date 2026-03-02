@@ -51,6 +51,10 @@ func New(cfg Config) (agent.Agent, error) {
 		maxIterations: cfg.MaxIterations,
 	}
 	cfg.AgentConfig.Run = loopAgentImpl.Run
+	// Set default RunLive if not provided (e.g. SequentialAgent may override).
+	if cfg.AgentConfig.RunLive == nil {
+		cfg.AgentConfig.RunLive = loopAgentImpl.RunLive
+	}
 
 	loopAgent, err := agent.New(cfg.AgentConfig)
 	if err != nil {
@@ -70,6 +74,12 @@ func New(cfg Config) (agent.Agent, error) {
 
 type loopAgent struct {
 	maxIterations uint
+}
+
+func (a *loopAgent) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		yield(nil, fmt.Errorf("RunLive is not supported for LoopAgent"))
+	}
 }
 
 func (a *loopAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {

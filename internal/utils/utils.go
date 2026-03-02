@@ -137,9 +137,15 @@ func AppendInstructions(r *model.LLMRequest, instructions ...string) {
 		r.Config = &genai.GenerateContentConfig{}
 	}
 
+	if r.LiveConnectConfig == nil {
+		r.LiveConnectConfig = &genai.LiveConnectConfig{}
+	}
+
 	if r.Config.SystemInstruction == nil {
 		r.Config.SystemInstruction = genai.NewContentFromText(inst, genai.RoleUser)
+		r.LiveConnectConfig.SystemInstruction = genai.NewContentFromText(inst, genai.RoleUser)
 	} else {
 		r.Config.SystemInstruction.Parts = append(r.Config.SystemInstruction.Parts, genai.NewPartFromText(inst))
+		r.LiveConnectConfig.SystemInstruction.Parts = append(r.LiveConnectConfig.SystemInstruction.Parts, genai.NewPartFromText(inst))
 	}
 }
