@@ -166,7 +166,7 @@ func (s *Server) upstreamTask(ctx context.Context, conn *websocket.Conn, queue *
 		case websocket.TextMessage:
 			// Text message
 			log.Printf("[Upstream] Text message: %s", string(data))
-			content := genai.Content{
+			content := &genai.Content{
 				Parts: []*genai.Part{
 					{Text: string(data)},
 				},
