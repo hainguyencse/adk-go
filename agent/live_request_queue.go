@@ -20,8 +20,8 @@ func (q *LiveRequestQueue) SendRealtime(in genai.LiveRealtimeInput) {
 	q.ch <- LiveRequest{Realtime: &in}
 }
 
-func (q *LiveRequestQueue) SendContent(c genai.Content) {
-	q.ch <- LiveRequest{Content: &c}
+func (q *LiveRequestQueue) SendContent(c *genai.Content) {
+	q.ch <- LiveRequest{Content: c}
 }
 
 func (q *LiveRequestQueue) Close() {
