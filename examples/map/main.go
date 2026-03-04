@@ -118,7 +118,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	// Run config
 	runConfig := adkagent.RunConfig{
-		ResponseModalities: []genai.Modality{genai.ModalityText},
+		ResponseModalities: []genai.Modality{genai.ModalityAudio},
 	}
 
 	var wg sync.WaitGroup

@@ -68,6 +68,7 @@ type Flow struct {
 	BeforeToolCallbacks   []BeforeToolCallback
 	AfterToolCallbacks    []AfterToolCallback
 	OnToolErrorCallbacks  []OnToolErrorCallback
+	AudioCacheManager     *AudioCacheManager
 }
 
 var (
@@ -209,35 +210,6 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 			recvCh := make(chan recvResult, 1)
 			transferAgentCh := make(chan string, 1)
 			goroutineDone := make(chan struct{})
-			stateDelta := make(map[string]any)
-
-			// Accumulate partial transcription text across messages,
-			// matching Python's GeminiLlmConnection.receive() pattern.
-			var inputTranscriptionText string
-
-			// flushTranscription creates a user event from accumulated
-			// transcription text and sends it to recvCh so it gets
-			// persisted in the session before any agent transfer.
-			flushTranscription := func() {
-				if inputTranscriptionText == "" {
-					return
-				}
-				userEvent := session.NewEvent(ctx.InvocationID())
-				userEvent.Author = "user"
-				userEvent.Branch = ctx.Branch()
-				userEvent.LLMResponse = model.LLMResponse{
-					Content: &genai.Content{
-						Role:  "user",
-						Parts: []*genai.Part{{Text: inputTranscriptionText}},
-					},
-					InputTranscription: &genai.Transcription{
-						Text:     inputTranscriptionText,
-						Finished: true,
-					},
-				}
-				recvCh <- recvResult{ev: userEvent}
-				inputTranscriptionText = ""
-			}
 
 			go func() {
 				defer close(goroutineDone)
@@ -250,9 +222,12 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 
 					msg, err := genaiSession.Receive()
 					if err != nil {
+						fmt.Println("err", err)
 						recvCh <- recvResult{err: err}
 						return
 					}
+
+					fmt.Println("msg==>", msg)
 
 					llmResponse := liveServerMessageToLLMResponse(msg)
 					if llmResponse == nil {
@@ -263,39 +238,43 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 						ctx.SetLiveSessionResumptionHandle(llmResponse.LiveSessionResumptionUpdate.NewHandle)
 					}
 
-					// Handle input transcription: accumulate partial text and
-					// yield a user event when the transcription is finished.
-					// This mirrors Python's GeminiLlmConnection.receive().
-					if llmResponse.InputTranscription != nil {
-						if llmResponse.InputTranscription.Text != "" {
-							inputTranscriptionText += llmResponse.InputTranscription.Text
-						}
-						if llmResponse.InputTranscription.Finished {
-							flushTranscription()
-						}
-					}
+					modelResponseEvent := session.NewEvent(ctx.InvocationID())
+					modelResponseEvent.Author = ctx.Agent().Name()
+					modelResponseEvent.Branch = ctx.Branch()
 
-					// Flush pending transcriptions on turn_complete/interrupted,
-					// matching Python's Gemini API fallback behavior.
-					if llmResponse.TurnComplete || llmResponse.Interrupted {
-						flushTranscription()
-					}
+					fmt.Println("modelResponseEvent==>", modelResponseEvent)
 
+					// ==========
 					if err := f.postprocess(ctx, req, llmResponse); err != nil {
 						recvCh <- recvResult{err: err}
 						return
 					}
 
-					// Skip the model response event if there is no content and no error code.
-					// Transcription-only messages are handled above, so skip them here.
 					if llmResponse.Content == nil &&
 						llmResponse.ErrorCode == "" &&
 						!llmResponse.Interrupted &&
 						!llmResponse.TurnComplete &&
+						llmResponse.InputTranscription == nil &&
+						llmResponse.OutputTranscription == nil &&
 						llmResponse.UsageMetadata == nil {
-						continue
+						return
 					}
 
+					if llmResponse.InputTranscription != nil {
+						modelResponseEvent.InputTranscription = llmResponse.InputTranscription
+						modelResponseEvent.Partial = llmResponse.Partial
+						recvCh <- recvResult{ev: modelResponseEvent}
+						return
+					}
+
+					if llmResponse.OutputTranscription != nil {
+						modelResponseEvent.OutputTranscription = llmResponse.OutputTranscription
+						modelResponseEvent.Partial = llmResponse.Partial
+						recvCh <- recvResult{ev: modelResponseEvent}
+						return
+					}
+
+					// Resolve tools
 					tools := make(map[string]tool.Tool)
 					for k, v := range req.Tools {
 						tool, ok := v.(tool.Tool)
@@ -306,39 +285,32 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 						tools[k] = tool
 					}
 
-					// Build the event and yield.
-					modelResponseEvent := f.finalizeModelResponseEvent(ctx, llmResponse, tools, stateDelta)
-					recvCh <- recvResult{ev: modelResponseEvent}
-
-					// Handle function calls.
-					ev, err := f.handleFunctionCalls(ctx, tools, llmResponse, nil)
-					if err != nil {
-						recvCh <- recvResult{err: err}
-						return
-					}
-					if ev == nil {
-						// nothing to yield/process.
+					if len(modelResponseEvent.FunctionCalls()) > 0 {
 						continue
 					}
 
-					recvCh <- recvResult{ev: ev}
-
-					// If the model response is structured, yield it as a final model response event.
-					outputSchemaResponse, err := retrieveStructuredModelResponse(ev)
+					functionResponseEvent, err := f.handleFunctionCalls(ctx, tools, llmResponse, nil)
 					if err != nil {
 						recvCh <- recvResult{err: err}
 						return
 					}
-					if outputSchemaResponse != "" {
-						recvCh <- recvResult{ev: createFinalModelResponseEvent(ctx, outputSchemaResponse)}
+
+					if functionResponseEvent == nil {
+						continue
 					}
 
-					// Signal transfer to main goroutine instead of handling it here.
-					if ev.Actions.TransferToAgent != "" {
-						// Flush any pending transcription before transferring so
-						// the sub-agent sees the user's last message in session history.
-						flushTranscription()
-						transferAgentCh <- ev.Actions.TransferToAgent
+					recvCh <- recvResult{ev: functionResponseEvent}
+
+					if functionResponseEvent.Actions.TransferToAgent != "" {
+						fmt.Println("RunLive.TransferToAgent", functionResponseEvent.Actions.TransferToAgent)
+						transferAgentCh <- functionResponseEvent.Actions.TransferToAgent
+						return
+					}
+					// ==========
+
+					// TODO: Handle reconnect
+
+					if ctx.Err() != nil {
 						return
 					}
 				}
@@ -408,7 +380,13 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 					}
 
 					if liveReq.Realtime != nil {
-						err := genaiSession.SendRealtimeInput(*liveReq.Realtime)
+						// TODO: Need to be clear logic this code
+						// err := f.AudioCacheManager.CacheAudio(ctx, liveReq.Realtime.Audio, "input")
+						// if err != nil {
+						// 	fmt.Println("AudioCacheManager.CacheAudio input error", err)
+						// }
+
+						err = genaiSession.SendRealtimeInput(*liveReq.Realtime)
 						if err != nil {
 							yield(nil, err)
 							return
@@ -601,6 +579,82 @@ func (f *Flow) preprocess(ctx agent.InvocationContext, req *model.LLMRequest) it
 	}
 }
 
+func (f *Flow) postprocessLive(ctx agent.InvocationContext, llmRequest *model.LLMRequest, llmResponse *model.LLMResponse, modelResponseEvent *session.Event) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		if err := f.postprocess(ctx, llmRequest, llmResponse); err != nil {
+			yield(nil, err)
+			return
+		}
+
+		if llmResponse.Content == nil &&
+			llmResponse.ErrorCode == "" &&
+			!llmResponse.Interrupted &&
+			!llmResponse.TurnComplete &&
+			llmResponse.InputTranscription == nil &&
+			llmResponse.OutputTranscription == nil &&
+			llmResponse.UsageMetadata == nil {
+			return
+		}
+
+		if llmResponse.InputTranscription != nil {
+			modelResponseEvent.InputTranscription = llmResponse.InputTranscription
+			modelResponseEvent.Partial = llmResponse.Partial
+			yield(modelResponseEvent, nil)
+			return
+		}
+
+		if llmResponse.OutputTranscription != nil {
+			modelResponseEvent.OutputTranscription = llmResponse.OutputTranscription
+			modelResponseEvent.Partial = llmResponse.Partial
+			yield(modelResponseEvent, nil)
+			return
+		}
+
+		// Flush audio caches based on control events using configurable settings
+		if ctx.RunConfig().SaveLiveBlob {
+			// flushedEvents := f.handleControlEventFlush(ctx, llmResponse)
+			// for _, ev := range flushedEvents {
+			// 	if !yield(ev, nil) {
+			// 		return
+			// 	}
+			// }
+			// if len(flushedEvents) > 0 {
+			// 	// NOTE below return is O.K. for now, because currently we only flush
+			// 	// events on interrupted or turn_complete. turn_complete is a pure
+			// 	// control event and interrupted is not with content but those content
+			// 	// is ignorable because model is already interrupted. If we have other
+			// 	// case to flush events in the future that are not pure control events,
+			// 	// we should not return here.
+			// 	return
+			// }
+		}
+
+		// Resolve tools
+		tools := make(map[string]tool.Tool)
+		for k, v := range llmRequest.Tools {
+			tool, ok := v.(tool.Tool)
+			if !ok {
+				yield(nil, fmt.Errorf("unexpected tool type %T for tool %v", v, k))
+				return
+			}
+			tools[k] = tool
+		}
+
+		if len(modelResponseEvent.FunctionCalls()) > 0 {
+			functionResponseEvent, err := f.handleFunctionCalls(ctx, tools, llmResponse, nil)
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			if functionResponseEvent != nil {
+				if !yield(functionResponseEvent, nil) {
+					return
+				}
+			}
+		}
+	}
+}
+
 // toolPreprocess runs tool preprocess on the given request
 // If a tool set is encountered, it's expanded recursively in DFS fashion.
 // TODO: check need/feasibility of running this concurrently.
@@ -740,6 +794,7 @@ func liveServerMessageToLLMResponse(msg *genai.LiveServerMessage) *model.LLMResp
 		resp.UsageMetadata == nil &&
 		resp.InputTranscription == nil &&
 		resp.OutputTranscription == nil {
+		fmt.Println("liveServerMessageToLLMResponse nil")
 		return nil
 	}
 
@@ -1288,6 +1343,27 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 		maps.Copy(base.RequestedToolConfirmations, other.RequestedToolConfirmations)
 	}
 	return base
+}
+
+// handleControlEventFlush flushes audio caches based on control events using configurable settings
+func (f *Flow) handleControlEventFlush(ctx agent.InvocationContext, llmResponse *model.LLMResponse) []*session.Event {
+	if llmResponse.Interrupted {
+		events, err := f.AudioCacheManager.FlushCaches(ctx, false, true)
+		if err != nil {
+			fmt.Println("failed to flush audio caches")
+		}
+		return events
+	} else if llmResponse.TurnComplete {
+		events, err := f.AudioCacheManager.FlushCaches(ctx, true, true)
+		if err != nil {
+			fmt.Println("failed to flush audio caches")
+		}
+		return events
+	}
+
+	// TODO: Once generation_complete is surfaced on LlmResponse, we can flush
+	// model audio here (flush_user_audio=False, flush_model_audio=True).
+	return nil
 }
 
 func deepMergeMap(dst, src map[string]any) map[string]any {

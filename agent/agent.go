@@ -475,14 +475,16 @@ type invocationContext struct {
 	memory    Memory
 	session   session.Session
 
-	invocationID     string
-	branch           string
-	userContent      *genai.Content
-	runConfig        *RunConfig
-	endInvocation    bool
-	liveRequestQueue *LiveRequestQueue
+	invocationID  string
+	branch        string
+	userContent   *genai.Content
+	runConfig     *RunConfig
+	endInvocation bool
 
-	// Token for resuming live sessions. Returned from Live API
+	liveRequestQueue            *LiveRequestQueue
+	transcriptionCache          []TranscriptionEntry
+	inputRealtimeCache          []RealtimeCacheEntry
+	outputRealtimeCache         []RealtimeCacheEntry
 	liveSessionResumptionHandle string
 }
 
@@ -532,16 +534,44 @@ func (c *invocationContext) WithContext(ctx context.Context) InvocationContext {
 	return &newCtx
 }
 
-func (c *invocationContext) LiveRequestQueue() *LiveRequestQueue {
-	return c.liveRequestQueue
+func (c *invocationContext) TranscriptionCache() []TranscriptionEntry {
+	return c.transcriptionCache
 }
 
 func (c *invocationContext) LiveSessionResumptionHandle() string {
 	return c.liveSessionResumptionHandle
 }
 
+func (c *invocationContext) InputRealtimeCache() []RealtimeCacheEntry {
+	return c.inputRealtimeCache
+}
+
+func (c *invocationContext) OutputRealtimeCache() []RealtimeCacheEntry {
+	return c.outputRealtimeCache
+}
+
+func (c *invocationContext) AppendInputRealtimeCache(entry RealtimeCacheEntry) {
+	c.inputRealtimeCache = append(c.inputRealtimeCache, entry)
+}
+
+func (c *invocationContext) AppendOutputRealtimeCache(entry RealtimeCacheEntry) {
+	c.outputRealtimeCache = append(c.outputRealtimeCache, entry)
+}
+
+func (c *invocationContext) ClearInputRealtimeCache() {
+	c.inputRealtimeCache = nil
+}
+
+func (c *invocationContext) ClearOutputRealtimeCache() {
+	c.outputRealtimeCache = nil
+}
+
 func (c *invocationContext) SetLiveSessionResumptionHandle(handle string) {
 	c.liveSessionResumptionHandle = handle
+}
+
+func (c *invocationContext) LiveRequestQueue() *LiveRequestQueue {
+	return c.liveRequestQueue
 }
 
 func pluginManagerFromContext(ctx context.Context) pluginManager {
