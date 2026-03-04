@@ -246,23 +246,6 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequ
 			cfg.ResponseModalities = []genai.Modality{genai.ModalityAudio}
 		}
 
-		hasAudio := false
-		for _, m := range cfg.ResponseModalities {
-			if m == genai.ModalityAudio {
-				hasAudio = true
-				break
-			}
-		}
-		if hasAudio && cfg.SpeechConfig == nil {
-			cfg.SpeechConfig = &genai.SpeechConfig{
-				VoiceConfig: &genai.VoiceConfig{
-					PrebuiltVoiceConfig: &genai.PrebuiltVoiceConfig{
-						VoiceName: "Aoede",
-					},
-				},
-			}
-		}
-
 		if strings.TrimSpace(userID) == "" || strings.TrimSpace(sessionID) == "" {
 			yield(nil, fmt.Errorf("userID and sessionID must be provided."))
 			return

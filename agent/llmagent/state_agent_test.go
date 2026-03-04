@@ -39,7 +39,7 @@ import (
 // FakeLLM is a mock implementation of model.LLM for testing.
 type FakeLLM struct {
 	GenerateContentFunc func(ctx context.Context, req *model.LLMRequest, stream bool) (model.LLMResponse, error)
-	ConnectFunc         func(ctx context.Context, req *model.LLMRequest) (*genai.Session, error)
+	ConnectFunc         func(ctx context.Context, req *model.LLMRequest) (model.LiveConnection, error)
 }
 
 func (f *FakeLLM) Name() string {
@@ -60,7 +60,7 @@ func (f *FakeLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, st
 	}
 }
 
-func (f *FakeLLM) Connect(ctx context.Context, req *model.LLMRequest) (*genai.Session, error) {
+func (f *FakeLLM) Connect(ctx context.Context, req *model.LLMRequest) (model.LiveConnection, error) {
 	if f.ConnectFunc != nil {
 		return f.ConnectFunc(ctx, req)
 	}

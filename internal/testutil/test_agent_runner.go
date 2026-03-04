@@ -205,7 +205,7 @@ func (m *MockModel) Name() string {
 	return "mock"
 }
 
-func (m *MockModel) Connect(ctx context.Context, req *model.LLMRequest) (*genai.Session, error) {
+func (m *MockModel) Connect(ctx context.Context, req *model.LLMRequest) (model.LiveConnection, error) {
 	return nil, nil
 }
 

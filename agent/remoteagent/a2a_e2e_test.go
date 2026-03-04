@@ -232,7 +232,7 @@ func TestA2AMultiHopInputRequired(t *testing.T) {
 type llmStub struct {
 	name            string
 	generateContent func(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error]
-	connect         func(ctx context.Context, req *model.LLMRequest) (*genai.Session, error)
+	connect         func(ctx context.Context, req *model.LLMRequest) (model.LiveConnection, error)
 }
 
 func (d *llmStub) Name() string {
@@ -243,7 +243,7 @@ func (d *llmStub) GenerateContent(ctx context.Context, req *model.LLMRequest, st
 	return d.generateContent(ctx, req, stream)
 }
 
-func (d *llmStub) Connect(ctx context.Context, req *model.LLMRequest) (*genai.Session, error) {
+func (d *llmStub) Connect(ctx context.Context, req *model.LLMRequest) (model.LiveConnection, error) {
 	return d.connect(ctx, req)
 }
 
