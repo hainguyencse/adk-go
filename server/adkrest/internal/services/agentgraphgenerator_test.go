@@ -41,7 +41,7 @@ func (d *dummyLLM) Name() string {
 	return d.name
 }
 
-func (d *dummyLLM) Connect(ctx context.Context, req *model.LLMRequest) (*genai.Session, error) {
+func (d *dummyLLM) Connect(ctx context.Context, req *model.LLMRequest) (model.LiveConnection, error) {
 	return nil, nil
 }
 

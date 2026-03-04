@@ -16,6 +16,7 @@ package agent
 
 import (
 	"context"
+	"time"
 
 	"google.golang.org/genai"
 
@@ -103,8 +104,33 @@ type InvocationContext interface {
 
 	LiveRequestQueue() *LiveRequestQueue
 
+	// TranscriptionCache caches necessary data, audio or contents, that are needed by transcription.
+	TranscriptionCache() []TranscriptionEntry
+
+	// InputRealtimeCache caches input audio chunks before flushing to session and artifact services.
+	InputRealtimeCache() []RealtimeCacheEntry
+
+	// OutputRealtimeCache caches output audio chunks before flushing to session and artifact services.
+	OutputRealtimeCache() []RealtimeCacheEntry
+
+	// ResumabilityConfig that applies to all agents under this invocation.
+	ResumabilityConfig() *ResumabilityConfig
+
+	// AppendInputRealtimeCache appends an audio chunk to the input cache.
+	AppendInputRealtimeCache(entry RealtimeCacheEntry)
+
+	// AppendOutputRealtimeCache appends an audio chunk to the output cache.
+	AppendOutputRealtimeCache(entry RealtimeCacheEntry)
+
+	// ClearInputRealtimeCache clears the input audio cache.
+	ClearInputRealtimeCache()
+
+	// ClearOutputRealtimeCache clears the output audio cache.
+	ClearOutputRealtimeCache()
+
 	// Get token for resuming live sessions. this token return from Live API. And store in context
 	LiveSessionResumptionHandle() string
+
 	SetLiveSessionResumptionHandle(string)
 }
 
@@ -131,4 +157,13 @@ type CallbackContext interface {
 
 	Artifacts() Artifacts
 	State() session.State
+}
+
+type RealtimeCacheEntry struct {
+	// Role that created this audio data, typically "user" or "model".
+	Role string
+	// Data is audio data chunk.
+	Data *genai.Blob
+	// Timestamp when the audio chunk was received.
+	Timestamp time.Time
 }

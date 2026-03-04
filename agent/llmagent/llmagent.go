@@ -385,7 +385,6 @@ func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 }
 
 func (a *llmAgent) runLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-	// TODO: branch context?
 	ctx = icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 		Artifacts:                   ctx.Artifacts(),
 		Memory:                      ctx.Memory(),
@@ -396,11 +395,13 @@ func (a *llmAgent) runLive(ctx agent.InvocationContext) iter.Seq2[*session.Event
 		RunConfig:                   ctx.RunConfig(),
 		InvocationID:                ctx.InvocationID(),
 		LiveRequestQueue:            ctx.LiveRequestQueue(),
+		ResumabilityConfig:          ctx.ResumabilityConfig(),
 		LiveSessionResumptionHandle: ctx.LiveSessionResumptionHandle(),
 	})
 
 	f := &llminternal.Flow{
 		Model:                 a.model,
+		AudioCacheManager:     llminternal.NewAudioCacheManager(nil),
 		RequestProcessors:     llminternal.DefaultRequestProcessors,
 		ResponseProcessors:    llminternal.DefaultResponseProcessors,
 		BeforeModelCallbacks:  a.beforeModelCallbacks,

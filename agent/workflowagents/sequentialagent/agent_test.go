@@ -303,7 +303,7 @@ func (f *FakeLLM) Name() string {
 	return "fake-llm"
 }
 
-func (f *FakeLLM) Connect(ctx context.Context, req *model.LLMRequest) (*genai.Session, error) {
+func (f *FakeLLM) Connect(ctx context.Context, req *model.LLMRequest) (model.LiveConnection, error) {
 	return nil, nil
 }
 

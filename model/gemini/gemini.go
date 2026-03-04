@@ -142,9 +142,9 @@ func (m *geminiModel) maybeAppendUserContent(req *model.LLMRequest) {
 	}
 }
 
-func (m *geminiModel) Connect(ctx context.Context, req *model.LLMRequest) (*genai.Session, error) {
-	fmt.Println("req.ResponseModalities =>", req.LiveConnectConfig.ResponseModalities)
-	fmt.Println("req.SpeechConfig =>", req.LiveConnectConfig.SpeechConfig)
+// func (m *geminiModel) Connect(ctx context.Context, req *model.LLMRequest) (*genai.Session, error) {
+// 	fmt.Println("req.ResponseModalities =>", req.LiveConnectConfig.ResponseModalities)
+// 	fmt.Println("req.SpeechConfig =>", req.LiveConnectConfig.SpeechConfig)
 
-	return m.client.Live.Connect(ctx, m.name, req.LiveConnectConfig)
-}
+// 	return m.client.Live.Connect(ctx, m.name, req.LiveConnectConfig)
+// }

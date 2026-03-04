@@ -379,7 +379,7 @@ Ask the user for a keyword to search for properties/projects, then call the MCP 
 
 FLOW:
 1) Ask the user: "What project or location would you like to search for?"
-2) Once user provides a keyword, call the search location MCP tool with that keyword.
+2) Once user provides a keyword, call the search_location MCP tool with that keyword.
 3) The search results will be displayed in the chatbox automatically. Do NOT read all results aloud.
    Just say briefly: "I found some results. Please check the chat and confirm your selection."
 4) If results are EMPTY: say "No results found. Please try another keyword." and wait for a new keyword. Do NOT call confirm_project or task_completed.
