@@ -227,8 +227,6 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 						return
 					}
 
-					fmt.Println("msg==>", msg)
-
 					llmResponse := liveServerMessageToLLMResponse(msg)
 					if llmResponse == nil {
 						continue
@@ -239,74 +237,43 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 					}
 
 					modelResponseEvent := session.NewEvent(ctx.InvocationID())
-					modelResponseEvent.Author = ctx.Agent().Name()
-					modelResponseEvent.Branch = ctx.Branch()
+					modelResponseEvent.Content = llmResponse.Content
+					modelResponseEvent.Author = f.getAuthorForEvent(ctx, llmResponse)
+					modelResponseEvent.OutputTranscription = llmResponse.OutputTranscription
+					modelResponseEvent.InputTranscription = llmResponse.InputTranscription
 
-					fmt.Println("modelResponseEvent==>", modelResponseEvent)
-
-					// ==========
-					if err := f.postprocess(ctx, req, llmResponse); err != nil {
-						recvCh <- recvResult{err: err}
-						return
-					}
-
-					if llmResponse.Content == nil &&
-						llmResponse.ErrorCode == "" &&
-						!llmResponse.Interrupted &&
-						!llmResponse.TurnComplete &&
-						llmResponse.InputTranscription == nil &&
-						llmResponse.OutputTranscription == nil &&
-						llmResponse.UsageMetadata == nil {
-						return
-					}
-
-					if llmResponse.InputTranscription != nil {
-						modelResponseEvent.InputTranscription = llmResponse.InputTranscription
-						modelResponseEvent.Partial = llmResponse.Partial
-						recvCh <- recvResult{ev: modelResponseEvent}
-						return
-					}
-
-					if llmResponse.OutputTranscription != nil {
-						modelResponseEvent.OutputTranscription = llmResponse.OutputTranscription
-						modelResponseEvent.Partial = llmResponse.Partial
-						recvCh <- recvResult{ev: modelResponseEvent}
-						return
-					}
-
-					// Resolve tools
-					tools := make(map[string]tool.Tool)
-					for k, v := range req.Tools {
-						tool, ok := v.(tool.Tool)
-						if !ok {
-							recvCh <- recvResult{err: fmt.Errorf("unexpected tool type %T for tool %v", v, k)}
+					for ev, err := range f.postprocessLive(ctx, req, llmResponse, modelResponseEvent) {
+						if err != nil {
+							recvCh <- recvResult{err: err}
 							return
 						}
-						tools[k] = tool
-					}
 
-					if len(modelResponseEvent.FunctionCalls()) > 0 {
-						continue
-					}
+						if ctx.RunConfig().SaveLiveBlob &&
+							ev.Content != nil &&
+							ev.Content.Parts != nil &&
+							ev.Content.Parts[0].InlineData != nil &&
+							strings.HasPrefix(ev.Content.Parts[0].InlineData.MIMEType, "audio/") {
 
-					functionResponseEvent, err := f.handleFunctionCalls(ctx, tools, llmResponse, nil)
-					if err != nil {
-						recvCh <- recvResult{err: err}
-						return
-					}
+							audioBlob := &genai.Blob{
+								Data:     ev.Content.Parts[0].InlineData.Data,
+								MIMEType: ev.Content.Parts[0].InlineData.MIMEType,
+							}
 
-					if functionResponseEvent == nil {
-						continue
-					}
+							if err := f.AudioCacheManager.CacheAudio(ctx, audioBlob, "output"); err != nil {
+								fmt.Println("Cached Audio Failed")
+							}
 
-					recvCh <- recvResult{ev: functionResponseEvent}
+							fmt.Println("Cached Audio Blob Length", len(audioBlob.Data))
+						}
 
-					if functionResponseEvent.Actions.TransferToAgent != "" {
-						fmt.Println("RunLive.TransferToAgent", functionResponseEvent.Actions.TransferToAgent)
-						transferAgentCh <- functionResponseEvent.Actions.TransferToAgent
-						return
+						recvCh <- recvResult{ev: ev}
+
+						if ev != nil && ev.Actions.TransferToAgent != "" {
+							fmt.Println("RunLive.TransferToAgent", ev.Actions.TransferToAgent)
+							transferAgentCh <- ev.Actions.TransferToAgent
+							return
+						}
 					}
-					// ==========
 
 					// TODO: Handle reconnect
 
@@ -380,11 +347,15 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 					}
 
 					if liveReq.Realtime != nil {
-						// TODO: Need to be clear logic this code
-						// err := f.AudioCacheManager.CacheAudio(ctx, liveReq.Realtime.Audio, "input")
-						// if err != nil {
-						// 	fmt.Println("AudioCacheManager.CacheAudio input error", err)
-						// }
+						// TODO: Check if need
+						if ctx.RunConfig().SaveLiveBlob &&
+							liveReq.Realtime.Audio != nil &&
+							strings.HasPrefix(liveReq.Realtime.Audio.MIMEType, "audio/") {
+							err := f.AudioCacheManager.CacheAudio(ctx, liveReq.Realtime.Audio, "input")
+							if err != nil {
+								fmt.Println("AudioCacheManager.CacheAudio input error", err)
+							}
+						}
 
 						err = genaiSession.SendRealtimeInput(*liveReq.Realtime)
 						if err != nil {
@@ -612,12 +583,13 @@ func (f *Flow) postprocessLive(ctx agent.InvocationContext, llmRequest *model.LL
 
 		// Flush audio caches based on control events using configurable settings
 		if ctx.RunConfig().SaveLiveBlob {
-			// flushedEvents := f.handleControlEventFlush(ctx, llmResponse)
-			// for _, ev := range flushedEvents {
-			// 	if !yield(ev, nil) {
-			// 		return
-			// 	}
-			// }
+			flushedEvents := f.handleControlEventFlush(ctx, llmResponse)
+			for _, ev := range flushedEvents {
+				if !yield(ev, nil) {
+					return
+				}
+			}
+
 			// if len(flushedEvents) > 0 {
 			// 	// NOTE below return is O.K. for now, because currently we only flush
 			// 	// events on interrupted or turn_complete. turn_complete is a pure
@@ -640,7 +612,13 @@ func (f *Flow) postprocessLive(ctx agent.InvocationContext, llmRequest *model.LL
 			tools[k] = tool
 		}
 
-		if len(modelResponseEvent.FunctionCalls()) > 0 {
+		stateDelta := make(map[string]any)
+		newModelResponseEvent := f.finalizeModelResponseEvent(ctx, llmResponse, tools, stateDelta)
+		if !yield(newModelResponseEvent, nil) {
+			return
+		}
+
+		if len(newModelResponseEvent.FunctionCalls()) > 0 {
 			functionResponseEvent, err := f.handleFunctionCalls(ctx, tools, llmResponse, nil)
 			if err != nil {
 				yield(nil, err)
@@ -794,7 +772,6 @@ func liveServerMessageToLLMResponse(msg *genai.LiveServerMessage) *model.LLMResp
 		resp.UsageMetadata == nil &&
 		resp.InputTranscription == nil &&
 		resp.OutputTranscription == nil {
-		fmt.Println("liveServerMessageToLLMResponse nil")
 		return nil
 	}
 
@@ -1364,6 +1341,14 @@ func (f *Flow) handleControlEventFlush(ctx agent.InvocationContext, llmResponse 
 	// TODO: Once generation_complete is surfaced on LlmResponse, we can flush
 	// model audio here (flush_user_audio=False, flush_model_audio=True).
 	return nil
+}
+
+func (f *Flow) getAuthorForEvent(ctx agent.InvocationContext, llmResponse *model.LLMResponse) string {
+	if llmResponse != nil && llmResponse.Content != nil && llmResponse.Content.Role == "user" {
+		return "user"
+	}
+
+	return ctx.Agent().Name()
 }
 
 func deepMergeMap(dst, src map[string]any) map[string]any {
