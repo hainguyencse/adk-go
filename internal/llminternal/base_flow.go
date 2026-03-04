@@ -131,7 +131,8 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 		}
 
 		req := &model.LLMRequest{
-			Model: f.Model.Name(),
+			Model:             f.Model.Name(),
+			LiveConnectConfig: runconfig.FromContext(ctx).LiveConnectConfig,
 		}
 
 		// Preprocess before calling the LLM.

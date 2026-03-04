@@ -14,7 +14,14 @@ import (
 )
 
 func GetModel(ctx context.Context) (adkmodel.LLM, error) {
-	modelLLM, err := gemini.NewModel(ctx, "gemini-2.5-flash-native-audio-preview-09-2025", &genai.ClientConfig{
+	// gemini-2.5-flash-native-audio-preview-09-2025
+	// gemini-2.0-flash-live-001
+	modelName := os.Getenv("MODEL_NAME")
+	if modelName == "" {
+		modelName = "gemini-2.5-flash-native-audio-preview-09-2025"
+	}
+
+	modelLLM, err := gemini.NewModel(ctx, modelName, &genai.ClientConfig{
 		APIKey: os.Getenv("GOOGLE_API_KEY"),
 	})
 	if err != nil {
