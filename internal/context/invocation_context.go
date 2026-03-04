@@ -32,12 +32,15 @@ type InvocationContextParams struct {
 	Branch string
 	Agent  agent.Agent
 
-	UserContent                 *genai.Content
-	RunConfig                   *agent.RunConfig
-	EndInvocation               bool
-	InvocationID                string
+	UserContent   *genai.Content
+	RunConfig     *agent.RunConfig
+	EndInvocation bool
+	// TODO: Check how to add ResumabilityConfig *agent.ResumabilityConfig
+
 	LiveRequestQueue            *agent.LiveRequestQueue
 	LiveSessionResumptionHandle string
+
+	InvocationID string
 }
 
 func NewInvocationContext(ctx context.Context, params InvocationContextParams) agent.InvocationContext {
