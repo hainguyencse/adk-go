@@ -33,9 +33,10 @@ type InvocationContextParams struct {
 	Branch string
 	Agent  agent.Agent
 
-	UserContent   *genai.Content
-	RunConfig     *agent.RunConfig
-	EndInvocation bool
+	UserContent        *genai.Content
+	RunConfig          *agent.RunConfig
+	EndInvocation      bool
+	ResumabilityConfig *agent.ResumabilityConfig
 
 	LiveRequestQueue            *agent.LiveRequestQueue
 	LiveSessionResumptionHandle string
@@ -150,6 +151,10 @@ func (c *InvocationContext) OutputRealtimeCache() []agent.RealtimeCacheEntry {
 	c.state.mu.RLock()
 	defer c.state.mu.RUnlock()
 	return c.state.outputRealtimeCache
+}
+
+func (c *InvocationContext) ResumabilityConfig() *agent.ResumabilityConfig {
+	return c.params.ResumabilityConfig
 }
 
 func (c *InvocationContext) AppendInputRealtimeCache(entry agent.RealtimeCacheEntry) {

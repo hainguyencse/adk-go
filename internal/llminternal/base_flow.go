@@ -124,6 +124,12 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 	}
 }
 
+type liveResult struct {
+	event     *session.Event
+	err       error
+	reconnect bool
+}
+
 func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		if f.Model == nil {
@@ -151,6 +157,8 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 		if ctx.Ended() {
 			return
 		}
+
+		// TODO: Enable Resumability when disconnect suddendly
 
 		log.Info(ctx, "Flow.RunLive: start")
 		attempt := 1
@@ -196,23 +204,17 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 				return
 			}
 
-			// Main loop to receive messages from Gemini Live API session.
-			//
-			// The receive goroutine processes incoming messages and signals transfer
-			// requests back to the main goroutine via transferCh. This ensures the
-			// parent's iterator function stays alive during a transfer, so the caller
-			// keeps producing messages for the sub-agent's liveRequestQueue.
-			type recvResult struct {
-				ev  *session.Event
-				err error
-			}
-
-			recvCh := make(chan recvResult, 1)
+			// Live message send from receiver
+			liveCh := make(chan liveResult, 1)
+			// Next Agent Name to Transfer
 			transferAgentCh := make(chan string, 1)
-			goroutineDone := make(chan struct{})
+			// Use to wait receiver messages process done before transfer to next agent
+			receiverDone := make(chan struct{})
 
+			// Receiver
 			go func() {
-				defer close(goroutineDone)
+				defer close(receiverDone)
+
 				for {
 					select {
 					case <-ctx.Done():
@@ -223,7 +225,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 					msg, err := genaiSession.Receive()
 					if err != nil {
 						fmt.Println("err", err)
-						recvCh <- recvResult{err: err}
+						liveCh <- liveResult{err: err}
 						return
 					}
 
@@ -236,6 +238,8 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 						ctx.SetLiveSessionResumptionHandle(llmResponse.LiveSessionResumptionUpdate.NewHandle)
 					}
 
+					// TODO: Enable Resumability when disconnect suddendly
+
 					modelResponseEvent := session.NewEvent(ctx.InvocationID())
 					modelResponseEvent.Content = llmResponse.Content
 					modelResponseEvent.Author = f.getAuthorForEvent(ctx, llmResponse)
@@ -244,7 +248,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 
 					for ev, err := range f.postprocessLive(ctx, req, llmResponse, modelResponseEvent) {
 						if err != nil {
-							recvCh <- recvResult{err: err}
+							liveCh <- liveResult{err: err}
 							return
 						}
 
@@ -266,7 +270,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 							fmt.Println("Cached Audio Blob Length", len(audioBlob.Data))
 						}
 
-						recvCh <- recvResult{ev: ev}
+						liveCh <- liveResult{event: ev}
 
 						if ev != nil && ev.Actions.TransferToAgent != "" {
 							fmt.Println("RunLive.TransferToAgent", ev.Actions.TransferToAgent)
@@ -275,7 +279,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 						}
 					}
 
-					// TODO: Handle reconnect
+					// TODO: Enable Resumability when disconnect suddendly
 
 					if ctx.Err() != nil {
 						return
@@ -283,9 +287,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 				}
 			}()
 
-			// Main loop: multiplexes sends and receives on the main goroutine.
-			// This ensures the iterator function stays alive during transfers,
-			// so the caller keeps producing messages for sub-agents.
+			// Sender
 		sendLoop:
 			for {
 				liveRequestQueue := ctx.LiveRequestQueue()
@@ -293,18 +295,18 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 				case <-ctx.Done():
 					return
 
-				case result := <-recvCh:
+				case result := <-liveCh:
 					if result.err != nil {
 						yield(nil, result.err)
 						return
 					}
-					if result.ev != nil {
-						if !yield(result.ev, nil) {
+
+					if result.event != nil {
+						if !yield(result.event, nil) {
 							return
 						}
-						// Send tool responses back to Gemini Live API so the model
-						// can continue the conversation based on tool results.
-						if fnResps := extractFunctionResponses(result.ev); len(fnResps) > 0 {
+						// Send tool responses back to Gemini Live API so the model can continue the conversation based on tool results.
+						if fnResps := extractFunctionResponses(result.event); len(fnResps) > 0 {
 							if err := genaiSession.SendToolResponse(genai.LiveToolResponseInput{
 								FunctionResponses: fnResps,
 							}); err != nil {
@@ -314,11 +316,10 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 						}
 					}
 
-				case agentName := <-transferAgentCh:
-					// Transfer requested by receive goroutine.
+				case agentName := <-transferAgentCh: // Transfer to next agent
 					// Close current session and wait for goroutine to exit.
 					closeSession()
-					<-goroutineDone
+					<-receiverDone
 
 					// Clear the resumption handle: the session it belonged to is now
 					// closed, and the next agent has different tools/instructions so
@@ -347,7 +348,6 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 					}
 
 					if liveReq.Realtime != nil {
-						// TODO: Check if need
 						if ctx.RunConfig().SaveLiveBlob &&
 							liveReq.Realtime.Audio != nil &&
 							strings.HasPrefix(liveReq.Realtime.Audio.MIMEType, "audio/") {
@@ -734,6 +734,9 @@ func liveServerMessageToLLMResponse(msg *genai.LiveServerMessage) *model.LLMResp
 
 	if msg.SessionResumptionUpdate != nil {
 		resp.LiveSessionResumptionUpdate = msg.SessionResumptionUpdate
+	}
+	if msg.GoAway != nil {
+		resp.LiveGoAway = msg.GoAway
 	}
 
 	if msg.ServerContent != nil {

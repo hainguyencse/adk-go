@@ -53,6 +53,9 @@ type Config struct {
 	ArtifactService artifact.Service
 	// optional
 	MemoryService memory.Service
+
+	ResumabilityConfig *agent.ResumabilityConfig
+
 	// optional
 	PluginConfig PluginConfig
 }
@@ -86,13 +89,14 @@ func New(cfg Config) (*Runner, error) {
 	}
 
 	return &Runner{
-		appName:         cfg.AppName,
-		rootAgent:       cfg.Agent,
-		sessionService:  cfg.SessionService,
-		artifactService: cfg.ArtifactService,
-		memoryService:   cfg.MemoryService,
-		parents:         parents,
-		pluginManager:   pluginManager,
+		appName:            cfg.AppName,
+		rootAgent:          cfg.Agent,
+		sessionService:     cfg.SessionService,
+		artifactService:    cfg.ArtifactService,
+		memoryService:      cfg.MemoryService,
+		parents:            parents,
+		pluginManager:      pluginManager,
+		resumabilityConfig: cfg.ResumabilityConfig,
 	}, nil
 }
 
@@ -105,6 +109,8 @@ type Runner struct {
 	sessionService  session.Service
 	artifactService artifact.Service
 	memoryService   memory.Service
+
+	resumabilityConfig *agent.ResumabilityConfig
 
 	parents       parentmap.Map
 	pluginManager *plugininternal.PluginManager
@@ -377,16 +383,16 @@ func (r *Runner) newInvocationContextForLive(ctx context.Context, userID, sessio
 	}
 
 	// TODO: Should double check logic resumability
-	// if r.resumabilityConfig != nil && r.resumabilityConfig.IsResumable {
-	// 	if cfg.SessionResumption != nil {
-	// 		liveConnectConfig.SessionResumption = cfg.SessionResumption
-	// 	} else {
-	// 		liveConnectConfig.SessionResumption = &genai.SessionResumptionConfig{
-	// 			Handle:      fmt.Sprintf("%s_%s", sessionID, userID),
-	// 			Transparent: true,
-	// 		}
-	// 	}
-	// }
+	if r.resumabilityConfig != nil && r.resumabilityConfig.IsResumable {
+		if cfg.SessionResumption != nil {
+			liveConnectConfig.SessionResumption = cfg.SessionResumption
+		} else {
+			liveConnectConfig.SessionResumption = &genai.SessionResumptionConfig{
+				Handle:      fmt.Sprintf("%s_%s", sessionID, userID),
+				Transparent: true,
+			}
+		}
+	}
 
 	ctx = parentmap.ToContext(ctx, r.parents)
 	ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
@@ -423,7 +429,7 @@ func (r *Runner) newInvocationContextForLive(ctx context.Context, userID, sessio
 		LiveRequestQueue: liveRequestQueue,
 		//TODO in go we dont have this stored anywhere yet.
 		LiveSessionResumptionHandle: "",
-		// ResumabilityConfig:          r.resumabilityConfig,
+		ResumabilityConfig:          r.resumabilityConfig,
 	})
 
 	return invCtx

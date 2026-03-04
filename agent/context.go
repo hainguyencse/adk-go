@@ -113,6 +113,9 @@ type InvocationContext interface {
 	// OutputRealtimeCache caches output audio chunks before flushing to session and artifact services.
 	OutputRealtimeCache() []RealtimeCacheEntry
 
+	// ResumabilityConfig that applies to all agents under this invocation.
+	ResumabilityConfig() *ResumabilityConfig
+
 	// AppendInputRealtimeCache appends an audio chunk to the input cache.
 	AppendInputRealtimeCache(entry RealtimeCacheEntry)
 

@@ -70,4 +70,5 @@ type LLMResponse struct {
 	InputTranscription *genai.Transcription
 	// Audio transcription of model output (from Gemini Live API).
 	OutputTranscription *genai.Transcription
+	LiveGoAway          *genai.LiveServerGoAway
 }
