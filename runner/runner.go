@@ -240,7 +240,14 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequ
 			cfg.ResponseModalities = []genai.Modality{genai.ModalityAudio}
 		}
 
-		if cfg.SpeechConfig == nil {
+		hasAudio := false
+		for _, m := range cfg.ResponseModalities {
+			if m == genai.ModalityAudio {
+				hasAudio = true
+				break
+			}
+		}
+		if hasAudio && cfg.SpeechConfig == nil {
 			cfg.SpeechConfig = &genai.SpeechConfig{
 				VoiceConfig: &genai.VoiceConfig{
 					PrebuiltVoiceConfig: &genai.PrebuiltVoiceConfig{

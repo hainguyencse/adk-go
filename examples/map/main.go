@@ -117,7 +117,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	defer liveRequestQueue.Close()
 
 	// Run config
-	runConfig := adkagent.RunConfig{}
+	runConfig := adkagent.RunConfig{
+		ResponseModalities: []genai.Modality{genai.ModalityText},
+	}
 
 	var wg sync.WaitGroup
 	wg.Add(2)
