@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"iter"
 	"log"
+	"strings"
 	"time"
 
 	"google.golang.org/genai"
@@ -235,6 +236,30 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 
 func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequestQueue *agent.LiveRequestQueue, cfg agent.RunConfig) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
+		if len(cfg.ResponseModalities) == 0 {
+			cfg.ResponseModalities = []genai.Modality{genai.ModalityAudio}
+		}
+
+		if cfg.SpeechConfig == nil {
+			cfg.SpeechConfig = &genai.SpeechConfig{
+				VoiceConfig: &genai.VoiceConfig{
+					PrebuiltVoiceConfig: &genai.PrebuiltVoiceConfig{
+						VoiceName: "Aoede",
+					},
+				},
+			}
+		}
+
+		if strings.TrimSpace(userID) == "" || strings.TrimSpace(sessionID) == "" {
+			yield(nil, fmt.Errorf("userID and sessionID must be provided."))
+			return
+		}
+
+		if liveRequestQueue == nil {
+			yield(nil, fmt.Errorf("live request queue must be provided"))
+			return
+		}
+
 		var storedSession session.Session
 		resp, err := r.sessionService.Get(ctx, &session.GetRequest{
 			AppName:   r.appName,
@@ -258,6 +283,26 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequ
 			storedSession = resp.Session
 		}
 
+		// For live multi-agents system, we need model's text transcription as
+		// context for the transferred agent.
+		if len(r.rootAgent.SubAgents()) > 0 {
+			found := false
+			for _, modality := range cfg.ResponseModalities {
+				if modality == genai.ModalityAudio {
+					found = true
+					break
+				}
+			}
+			if found {
+				if cfg.InputAudioTranscription == nil {
+					cfg.InputAudioTranscription = &genai.AudioTranscriptionConfig{}
+				}
+				if cfg.OutputAudioTranscription == nil {
+					cfg.OutputAudioTranscription = &genai.AudioTranscriptionConfig{}
+				}
+			}
+		}
+
 		agentToRun, err := r.findAgentToRunFromLastEvent(storedSession, r.rootAgent)
 		fmt.Println("agentToRun: ", agentToRun.Name())
 		if err != nil {
@@ -265,43 +310,10 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequ
 			return
 		}
 
-		ctx = parentmap.ToContext(ctx, r.parents)
-		ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
-			StreamingMode: runconfig.StreamingModeBidi,
-		})
-		ctx = plugininternal.ToContext(ctx, r.pluginManager)
-
-		var artifacts agent.Artifacts
-		if r.artifactService != nil {
-			artifacts = &artifactinternal.Artifacts{
-				Service:   r.artifactService,
-				SessionID: storedSession.ID(),
-				AppName:   storedSession.AppName(),
-				UserID:    storedSession.UserID(),
-			}
-		}
-
-		var memoryImpl agent.Memory = nil
-		if r.memoryService != nil {
-			memoryImpl = &imemory.Memory{
-				Service:   r.memoryService,
-				SessionID: storedSession.ID(),
-				UserID:    storedSession.UserID(),
-				AppName:   storedSession.AppName(),
-			}
-		}
-
-		ctx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-			Artifacts:        artifacts,
-			Memory:           memoryImpl,
-			Session:          sessioninternal.NewMutableSession(r.sessionService, storedSession),
-			Agent:            agentToRun,
-			LiveRequestQueue: liveRequestQueue,
-			RunConfig:        &cfg,
-		})
+		invCtx := r.newInvocationContextForLive(ctx, userID, sessionID, liveRequestQueue, cfg, agentToRun, storedSession)
 
 		pluginManager := r.pluginManager
-		for event, err := range agentToRun.RunLive(ctx) {
+		for event, err := range agentToRun.RunLive(invCtx) {
 			if err != nil {
 				if !yield(event, err) {
 					return
@@ -309,8 +321,9 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequ
 				continue
 			}
 
+			// ======== [BEGIN] TODO: Should check this block code ========
 			if pluginManager != nil {
-				modifiedEvent, err := pluginManager.RunOnEventCallback(ctx, event)
+				modifiedEvent, err := pluginManager.RunOnEventCallback(invCtx, event)
 				if err != nil {
 					if !yield(nil, err) {
 						return
@@ -324,17 +337,89 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequ
 
 			// only commit non-partial event to a session service
 			if !event.LLMResponse.Partial {
-				if err := r.sessionService.AppendEvent(ctx, storedSession, event); err != nil {
+				if err := r.sessionService.AppendEvent(invCtx, storedSession, event); err != nil {
 					yield(nil, fmt.Errorf("failed to add event to session: %w", err))
 					return
 				}
 			}
+			// ======== [END] TODO: Should check this block code ========
 
 			if !yield(event, nil) {
 				return
 			}
 		}
 	}
+}
+
+func (r *Runner) newInvocationContextForLive(ctx context.Context, userID, sessionID string, liveRequestQueue *agent.LiveRequestQueue, cfg agent.RunConfig, agentToRun agent.Agent, session session.Session) agent.InvocationContext {
+	liveConnectConfig := &genai.LiveConnectConfig{
+		ResponseModalities:       cfg.ResponseModalities,
+		SpeechConfig:             cfg.SpeechConfig,
+		InputAudioTranscription:  cfg.InputAudioTranscription,
+		OutputAudioTranscription: cfg.OutputAudioTranscription,
+		RealtimeInputConfig:      cfg.RealtimeInputConfig,
+		ContextWindowCompression: cfg.ContextWindowCompression,
+		Proactivity:              cfg.Proactivity,
+	}
+
+	if cfg.ExplicitVADSignal {
+		liveConnectConfig.ExplicitVADSignal = &cfg.ExplicitVADSignal
+	}
+	if cfg.EnableAffectiveDialog {
+		liveConnectConfig.EnableAffectiveDialog = &cfg.EnableAffectiveDialog
+	}
+
+	// TODO: Should double check logic resumability
+	// if r.resumabilityConfig != nil && r.resumabilityConfig.IsResumable {
+	// 	if cfg.SessionResumption != nil {
+	// 		liveConnectConfig.SessionResumption = cfg.SessionResumption
+	// 	} else {
+	// 		liveConnectConfig.SessionResumption = &genai.SessionResumptionConfig{
+	// 			Handle:      fmt.Sprintf("%s_%s", sessionID, userID),
+	// 			Transparent: true,
+	// 		}
+	// 	}
+	// }
+
+	ctx = parentmap.ToContext(ctx, r.parents)
+	ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
+		StreamingMode:     runconfig.StreamingMode(cfg.StreamingMode),
+		LiveConnectConfig: liveConnectConfig,
+	})
+
+	var artifacts agent.Artifacts
+	if r.artifactService != nil {
+		artifacts = &artifactinternal.Artifacts{
+			Service:   r.artifactService,
+			SessionID: session.ID(),
+			AppName:   session.AppName(),
+			UserID:    session.UserID(),
+		}
+	}
+
+	var memoryImpl agent.Memory = nil
+	if r.memoryService != nil {
+		memoryImpl = &imemory.Memory{
+			Service:   r.memoryService,
+			SessionID: session.ID(),
+			UserID:    session.UserID(),
+			AppName:   session.AppName(),
+		}
+	}
+
+	invCtx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+		Artifacts:        artifacts,
+		Memory:           memoryImpl,
+		Session:          session,
+		Agent:            agentToRun,
+		RunConfig:        &cfg,
+		LiveRequestQueue: liveRequestQueue,
+		//TODO in go we dont have this stored anywhere yet.
+		LiveSessionResumptionHandle: "",
+		// ResumabilityConfig:          r.resumabilityConfig,
+	})
+
+	return invCtx
 }
 
 func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool, pluginManager *plugininternal.PluginManager) (agent.InvocationContext, error) {
