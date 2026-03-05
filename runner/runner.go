@@ -245,6 +245,25 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequ
 		if len(cfg.ResponseModalities) == 0 {
 			cfg.ResponseModalities = []genai.Modality{genai.ModalityAudio}
 		}
+		isResponseAudio := false
+		for _, modality := range cfg.ResponseModalities {
+			if modality == genai.ModalityAudio {
+				isResponseAudio = true
+				break
+			}
+		}
+
+		// TODO: Should support config:
+		// - Not set. input_audio_transcription (1)
+		// - set nil to disable input_audio_transcription (2)
+		// - set value to enable input_audio_transcription (3)
+		// Currently, can not detect case (1), (2)
+		if isResponseAudio && cfg.InputAudioTranscription == nil {
+			cfg.InputAudioTranscription = &genai.AudioTranscriptionConfig{}
+		}
+		if isResponseAudio && cfg.OutputAudioTranscription == nil {
+			cfg.OutputAudioTranscription = &genai.AudioTranscriptionConfig{}
+		}
 
 		if strings.TrimSpace(userID) == "" || strings.TrimSpace(sessionID) == "" {
 			yield(nil, fmt.Errorf("userID and sessionID must be provided."))
@@ -281,21 +300,12 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequ
 
 		// For live multi-agents system, we need model's text transcription as
 		// context for the transferred agent.
-		if len(r.rootAgent.SubAgents()) > 0 {
-			found := false
-			for _, modality := range cfg.ResponseModalities {
-				if modality == genai.ModalityAudio {
-					found = true
-					break
-				}
+		if len(r.rootAgent.SubAgents()) > 0 && isResponseAudio {
+			if cfg.InputAudioTranscription == nil {
+				cfg.InputAudioTranscription = &genai.AudioTranscriptionConfig{}
 			}
-			if found {
-				if cfg.InputAudioTranscription == nil {
-					cfg.InputAudioTranscription = &genai.AudioTranscriptionConfig{}
-				}
-				if cfg.OutputAudioTranscription == nil {
-					cfg.OutputAudioTranscription = &genai.AudioTranscriptionConfig{}
-				}
+			if cfg.OutputAudioTranscription == nil {
+				cfg.OutputAudioTranscription = &genai.AudioTranscriptionConfig{}
 			}
 		}
 
