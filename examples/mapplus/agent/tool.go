@@ -63,24 +63,23 @@ func newAnalyticsLocationTool() (tool.Tool, error) {
 
 type analyticsLocationInput struct {
 	// Output from search_agent (tool: search_location)
-	LocationType   string `json:"locationType"   description:"location type from search"`
-	Keyword        string `json:"keyword"        description:"keyword from search"`
-	Radius         string `json:"radius"         description:"radius from search"`
-	LocationResult string `json:"locationResult"  description:"raw results returned by search_location tool"`
+	LocationType string `json:"locationType"   description:"location type from search"`
+	Keyword      string `json:"keyword"        description:"keyword from search"`
+	Radius       string `json:"radius"         description:"radius from search"`
+	ProjectID    string `json:"projectId"  	   description:"project id that user select"`
 }
 
 type analyticsLocationOutput struct {
-	ProjectIDs string `json:"projectIds"`
+	ProjectID string `json:"projectId"`
 }
 
 func analyticsLocation(ctx tool.Context, input analyticsLocationInput) (analyticsLocationOutput, error) {
 	fmt.Println("analyticsLocation input.LocationType", input.LocationType)
 	fmt.Println("analyticsLocation input.Keyword", input.Keyword)
 	fmt.Println("analyticsLocation input.Radius", input.Radius)
-	fmt.Println("analyticsLocation input.LocationResult", input.LocationResult)
 
 	return analyticsLocationOutput{
-		ProjectIDs: "1001,2002",
+		ProjectID: input.ProjectID,
 	}, nil
 }
 
@@ -102,19 +101,20 @@ func newSummaryLocationTool() (tool.Tool, error) {
 
 type summaryLocationInput struct {
 	// Output from search_agent (tool: analytics_location)
-	ProjectIDs string `json:"projectIds" description:"projectIds from analytics agent"`
+	ProjectID string `json:"projectId" description:"projectId from analytics agent"`
+	Action    string `json:"action" description:"action from user. example: export pdf, export image"`
 }
 
 type summaryLocationOutput struct {
-	ProjectIDs string `json:"projectIds"`
-	Summary    string `json:"summary"`
+	ProjectID string `json:"projectId"`
+	Action    string `json:"action"`
 }
 
 func summaryLocation(ctx tool.Context, input summaryLocationInput) (summaryLocationOutput, error) {
-	fmt.Println("summaryLocation input.ProjectIDs", input.ProjectIDs)
+	fmt.Println("summaryLocation input.ProjectID", input.ProjectID)
 
 	return summaryLocationOutput{
-		ProjectIDs: input.ProjectIDs,
-		Summary:    fmt.Sprintf("Summary for projects: %s", input.ProjectIDs),
+		ProjectID: input.ProjectID,
+		Action:    fmt.Sprintf("Action %s for project: %s", input.Action, input.ProjectID),
 	}, nil
 }

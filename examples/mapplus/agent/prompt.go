@@ -17,13 +17,30 @@ The previous search_agent already ran the search_location tool. Look at the conv
 - locationType
 - keyword
 - radius
-- locationResult
 
-Call the analytics tool using the exact values from that search_location result. Pass them through as-is without modification.`
+Also extract from the user's message:
+- projectId: the specific project ID the user selected or mentioned (e.g. "project 1001", "that project", an explicit ID)
+
+Call the analytics_location tool with:
+- locationType, keyword, radius from the search_location result (pass as-is)
+- projectId from the user's message`
 
 const summaryAgentPrompt = `You are a summary assistant for MAP+.
 
 The previous analytics_agent already ran the analytics_location tool. Look at the conversation context for the analytics_location tool result, which contains:
-- projectIds
+- projectId
 
-Call the summary_location tool using the exact projectIds value from that analytics_location result. Pass it through as-is without modification.`
+You also need:
+- action: what the user wants to do with the project (e.g. "export pdf", "export image", "share")
+
+If the user's current message contains a clear action, use it directly.
+If not, ask the user: "What would you like to do with this project? (e.g. export pdf, export image, share)"
+Wait for the user's response, then call the summary_location tool with:
+- projectId from the analytics_location result (pass as-is)
+- action from the user's response`
+
+const rootAgentPrompt = `You are the root assistant for MAP+, a real estate map application.
+
+If the user wants to search for properties, locations, or projects on the map (e.g. "find apartments", "search condos in Hanoi", "show me projects near District 1"), transfer to map_plus_agent.
+
+For anything else, respond directly.`

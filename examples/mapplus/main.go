@@ -43,7 +43,7 @@ func runWebSocketServer(ctx context.Context) {
 		log.Fatalf("Failed to get model: %v", err)
 	}
 
-	rootAgent, err := mapplusagent.NewMapPlusAgent(ctx, llmModel)
+	rootAgent, err := mapplusagent.NewRootAgent(ctx, llmModel)
 	if err != nil {
 		log.Fatalf("Failed to create agent: %v", err)
 	}

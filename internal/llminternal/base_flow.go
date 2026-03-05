@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"iter"
 	"maps"
+	"net"
 	"slices"
 	"strings"
 	"sync"
@@ -219,7 +220,6 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 					select {
 					case llmResponse, ok := <-resps:
 						if !ok {
-							fmt.Println("Response channel is closed.")
 							resps = nil // disable this case; wait for errs or ctx.Done()
 							continue
 						}
@@ -281,7 +281,16 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 							return
 						}
 						if err != nil {
-							fmt.Println("error received from live connection")
+							// TODO: task_completed fires → sequential agent breaks → yield returns false → sender returns
+							// "use of closed network connection" means closeSession() was called
+							// by the sender (e.g. after task_completed / agent transition).
+							// Treat it as a normal close, not a real error.
+							// Should check if this implement is best practise.
+							if errors.Is(err, net.ErrClosed) {
+								return
+							}
+
+							fmt.Println("Run Live Receiver - err: ", err)
 							liveCh <- liveResult{err: err}
 							return
 						}

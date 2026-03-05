@@ -6,6 +6,7 @@ import (
 	"os"
 
 	adkagent "google.golang.org/adk/agent"
+	"google.golang.org/adk/agent/llmagent"
 	adkagentllm "google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/agent/workflowagents/sequentialagent"
 	adkmodel "google.golang.org/adk/model"
@@ -99,4 +100,24 @@ func NewMapPlusAgent(ctx context.Context, llmModel adkmodel.LLM) (adkagent.Agent
 	}
 
 	return mapPlusAgent, nil
+}
+
+func NewRootAgent(ctx context.Context, llmModel adkmodel.LLM) (adkagent.Agent, error) {
+	mapPlusAgent, err := NewMapPlusAgent(ctx, llmModel)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create agent: %w", err)
+	}
+
+	rootAgent, err := llmagent.New(adkagentllm.Config{
+		Name:        "root_agent",
+		Description: "Root Agent. Transfer to agent if user request search map, search project",
+		Instruction: rootAgentPrompt,
+		Model:       llmModel,
+		Tools:       []tool.Tool{},
+		SubAgents: []adkagent.Agent{
+			mapPlusAgent,
+		},
+	})
+
+	return rootAgent, nil
 }
