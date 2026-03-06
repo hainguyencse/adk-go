@@ -138,8 +138,15 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 		}
 
 		req := &model.LLMRequest{
-			Model:             f.Model.Name(),
-			LiveConnectConfig: runconfig.FromContext(ctx).LiveConnectConfig,
+			Model: f.Model.Name(),
+			// clone to new LiveConnectConfig.
+			// runconfig.FromContext(ctx).LiveConnectConfig is ptr
+			// Flow:
+			// -  rootAgent: new LLMRequest with LiveConnectConfig[1]
+			// -> subAgent: change LiveConnectConfig from ctx and attach to create new LLMRequest [2]. At this step LiveConnectConfig[1] will be modified
+			// -> rootAgent when subAgent done and transfer back to rootAgent LiveConnectConfig[1] is modified.
+			// Solution: should clone new config instead of pass by ref
+			LiveConnectConfig: clone(runconfig.FromContext(ctx).LiveConnectConfig),
 		}
 
 		// Preprocess before calling the LLM.
@@ -160,12 +167,12 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 
 		// TODO: Enable Resumability when disconnect suddendly
 
-		log.Info(ctx, "Flow.RunLive: start")
+		log.Info(ctx, "Flow.RunLive start", "agent", ctx.Agent().Name(), "branch", ctx.Branch())
 		attempt := 1
 		for {
 			// Handle resumption connection
 			if handle := ctx.LiveSessionResumptionHandle(); handle != "" {
-				log.Info(ctx, "Resuming live session with handle: %s (attempt %d)", handle, attempt)
+				log.Info(ctx, "Resuming live session", "handle", handle, "attempt", attempt)
 				attempt += 1
 
 				if req.LiveConnectConfig == nil {
@@ -317,22 +324,6 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 					}
 
 					if result.event != nil {
-						if result.event.OutputTranscription != nil {
-							if result.event.OutputTranscription.Finished {
-								fmt.Println("OutputTranscription: ", result.event.OutputTranscription.Text)
-							} else {
-								fmt.Println("[Partial] OutputTranscription: ", result.event.OutputTranscription.Text)
-							}
-						}
-
-						if result.event.InputTranscription != nil {
-							if result.event.InputTranscription.Finished {
-								fmt.Println("InputTranscription: ", result.event.InputTranscription.Text)
-							} else {
-								fmt.Println("[Partial] InputTranscription: ", result.event.InputTranscription.Text)
-							}
-						}
-
 						if !yield(result.event, nil) {
 							return
 						}
@@ -372,6 +363,14 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 						if !yield(ev, err) || err != nil {
 							return
 						}
+					}
+					// Each agent owns its own LiveConnectConfig copy
+					// so sub-agents cannot contaminate this agent's SystemInstruction.
+					// Clear the resumption handle left by sub-agents so this agent starts a
+					// fresh Gemini Live session, not a continuation of the sub-agent's session.
+					ctx.SetLiveSessionResumptionHandle("")
+					if req.LiveConnectConfig != nil {
+						req.LiveConnectConfig.SessionResumption = nil
 					}
 					break sendLoop
 

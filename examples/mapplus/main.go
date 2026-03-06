@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -256,6 +257,14 @@ func (s *Server) downstreamTask(
 						}
 					}
 				}
+			}
+
+			if event.InputTranscription != nil && event.InputTranscription.Finished {
+				fmt.Println("[InputTranscription]: ", event.Author, ": ", event.InputTranscription.Text)
+			}
+
+			if event.OutputTranscription != nil && event.OutputTranscription.Finished {
+				fmt.Println("[OutputTranscription]: ", event.Author, ": ", event.OutputTranscription.Text)
 			}
 
 			// Send turn_complete / interrupted signals

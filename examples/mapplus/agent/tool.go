@@ -24,24 +24,30 @@ func newSearchLocationTool() (tool.Tool, error) {
 }
 
 type searchLocationInput struct {
+	PropertyType string `json:"propertyType,omitempty" description:"the property type"`
 	LocationType string `json:"locationType" description:"the location type"`
-	Keyword      string `json:"keyword" description:"search keyword location"`
-	Radius       string `json:"radius" description:"search radius"`
+	Keyword      string `json:"keyword,omitempty" description:"search keyword location"`
+	Radius       string `json:"radius,omitempty" description:"search radius"`
 }
 
 type searchLocationOutput struct {
-	LocationType   string `json:"locationType"`
-	Keyword        string `json:"keyword"`
-	Radius         string `json:"radius"`
-	LocationResult string `json:"locationResult"`
+	PropertyType string `json:"propertyType"`
+	LocationType string `json:"locationType"`
+	LocationIDs  string `json:"locationIDs"`
+	Radius       string `json:"radius"`
 }
 
 func searchLocation(ctx tool.Context, input searchLocationInput) (searchLocationOutput, error) {
+	radius := input.Radius
+	if radius == "" {
+		radius = "1000"
+	}
+
 	return searchLocationOutput{
-		LocationType:   input.LocationType,
-		Keyword:        input.Keyword,
-		Radius:         input.Radius,
-		LocationResult: fmt.Sprintf("%s: %s", input.LocationType, input.Keyword),
+		PropertyType: input.PropertyType,
+		LocationType: input.LocationType,
+		LocationIDs:  input.Keyword,
+		Radius:       radius,
 	}, nil
 }
 
@@ -63,23 +69,19 @@ func newAnalyticsLocationTool() (tool.Tool, error) {
 
 type analyticsLocationInput struct {
 	// Output from search_agent (tool: search_location)
-	LocationType string `json:"locationType"   description:"location type from search"`
-	Keyword      string `json:"keyword"        description:"keyword from search"`
-	Radius       string `json:"radius"         description:"radius from search"`
-	ProjectID    string `json:"projectId"  	   description:"project id that user select"`
+	PropertyType string `json:"propertyType" description:"propertyType from search"`
+	LocationType string `json:"locationType" description:"locationType from search"`
+	LocationIDs  string `json:"locationIDs"  description:"locationIDs from search"`
+	Radius       string `json:"radius"       description:"radius from search as a string (e.g. '1000', '2000'). always send as a quoted string, never as a number"`
 }
 
 type analyticsLocationOutput struct {
-	ProjectID string `json:"projectId"`
+	ProjectIDs string `json:"projectIds"`
 }
 
 func analyticsLocation(ctx tool.Context, input analyticsLocationInput) (analyticsLocationOutput, error) {
-	fmt.Println("analyticsLocation input.LocationType", input.LocationType)
-	fmt.Println("analyticsLocation input.Keyword", input.Keyword)
-	fmt.Println("analyticsLocation input.Radius", input.Radius)
-
 	return analyticsLocationOutput{
-		ProjectID: input.ProjectID,
+		ProjectIDs: "100,200,300",
 	}, nil
 }
 
@@ -101,20 +103,20 @@ func newSummaryLocationTool() (tool.Tool, error) {
 
 type summaryLocationInput struct {
 	// Output from search_agent (tool: analytics_location)
-	ProjectID string `json:"projectId" description:"projectId from analytics agent"`
-	Action    string `json:"action" description:"action from user. example: export pdf, export image"`
+	ProjectID string `json:"projectId" description:"the project ID as a string (e.g. '100', '200'). always send as a quoted string, never as a number"`
+	Action    string `json:"action" description:"action to perform on the project. supported values: export_pdf, export_image"`
 }
 
 type summaryLocationOutput struct {
-	ProjectID string `json:"projectId"`
 	Action    string `json:"action"`
+	Message   string `json:"message"`
+	ProjectID string `json:"projectId"`
 }
 
 func summaryLocation(ctx tool.Context, input summaryLocationInput) (summaryLocationOutput, error) {
-	fmt.Println("summaryLocation input.ProjectID", input.ProjectID)
-
 	return summaryLocationOutput{
+		Action:    input.Action,
 		ProjectID: input.ProjectID,
-		Action:    fmt.Sprintf("Action %s for project: %s", input.Action, input.ProjectID),
+		Message:   fmt.Sprintf("[%s]: Project: %s", input.Action, input.ProjectID),
 	}, nil
 }
