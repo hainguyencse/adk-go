@@ -7,14 +7,98 @@ import (
 	"google.golang.org/adk/tool/functiontool"
 )
 
+const restartSequenceStateKey = "restart_sequence"
+
+// ================= Tool task_completed ======================
+type taskCompletedInput struct{}
+
+type taskCompletedOutput struct {
+	Result string `json:"result"`
+}
+
+func newTaskCompletedTool() (tool.Tool, error) {
+	return functiontool.New(
+		functiontool.Config{
+			Name:        "task_completed",
+			Description: "Signals that this agent has finished its task. Call this when done so the next agent can run.",
+		},
+		func(ctx tool.Context, args taskCompletedInput) (taskCompletedOutput, error) {
+			ctx.Actions().Escalate = true
+			return taskCompletedOutput{Result: "Task completed."}, nil
+		},
+	)
+}
+
+// ================= Tool restart_sequence ======================
+type restartSequenceInput struct{}
+
+type restartSequenceOutput struct {
+	Result string `json:"result"`
+}
+
+func newRestartSequenceTool() (tool.Tool, error) {
+	return functiontool.New(
+		functiontool.Config{
+			Name:        "restart_sequence",
+			Description: "Restarts the whole pipeline from search_agent when the user wants to change their search requirements.",
+		},
+		func(ctx tool.Context, args restartSequenceInput) (restartSequenceOutput, error) {
+			ctx.Actions().Escalate = true
+			if ctx.Actions().StateDelta == nil {
+				ctx.Actions().StateDelta = make(map[string]any)
+			}
+			ctx.Actions().StateDelta[restartSequenceStateKey] = true
+			return restartSequenceOutput{Result: "Restarting sequence from search."}, nil
+		},
+	)
+}
+
 // ================= Tool search_location ======================
+type searchLocationInput struct {
+	PropertyType string `json:"propertyType,omitempty" description:"the property type"`
+	LocationType string `json:"locationType" description:"the location type"`
+	Keyword      string `json:"keyword,omitempty" description:"search keyword location"`
+	Radius       string `json:"radius,omitempty" description:"search radius"`
+
+	// ClientType Options:
+	// - buyer
+	// - seller
+	// - landlord
+	// - tenant
+	// - general_investor
+	ClientType string `json:"clientType" description:"clientType is required. Detect client type before analytics"`
+}
+
+type searchLocationOutput struct {
+	PropertyType string `json:"propertyType"`
+	LocationType string `json:"locationType"`
+	LocationIDs  string `json:"locationIDs"`
+	Radius       string `json:"radius"`
+	ClientType   string `json:"clientType"`
+}
+
 func newSearchLocationTool() (tool.Tool, error) {
 	funcTool, err := functiontool.New(
 		functiontool.Config{
 			Name:        "search_location",
 			Description: "Search location for MAP+",
 		},
-		searchLocation,
+		func(ctx tool.Context, input searchLocationInput) (searchLocationOutput, error) {
+			radius := input.Radius
+			if radius == "" {
+				radius = "1000"
+			}
+
+			result := searchLocationOutput{
+				PropertyType: input.PropertyType,
+				LocationType: input.LocationType,
+				LocationIDs:  input.Keyword,
+				ClientType:   input.ClientType,
+				Radius:       radius,
+			}
+
+			return result, nil
+		},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create search_location tool: %w", err)
@@ -23,77 +107,47 @@ func newSearchLocationTool() (tool.Tool, error) {
 	return funcTool, nil
 }
 
-type searchLocationInput struct {
-	PropertyType string `json:"propertyType,omitempty" description:"the property type"`
-	LocationType string `json:"locationType" description:"the location type"`
-	Keyword      string `json:"keyword,omitempty" description:"search keyword location"`
-	Radius       string `json:"radius,omitempty" description:"search radius"`
-}
-
-type searchLocationOutput struct {
-	PropertyType string `json:"propertyType"`
-	LocationType string `json:"locationType"`
-	LocationIDs  string `json:"locationIDs"`
-	Radius       string `json:"radius"`
-}
-
-func searchLocation(ctx tool.Context, input searchLocationInput) (searchLocationOutput, error) {
-	radius := input.Radius
-	if radius == "" {
-		radius = "1000"
-	}
-
-	return searchLocationOutput{
-		PropertyType: input.PropertyType,
-		LocationType: input.LocationType,
-		LocationIDs:  input.Keyword,
-		Radius:       radius,
-	}, nil
-}
-
 // ================= Tool analytics_location ======================
-func newAnalyticsLocationTool() (tool.Tool, error) {
-	funcTool, err := functiontool.New(
-		functiontool.Config{
-			Name:        "analytics_location",
-			Description: "Analytics Location",
-		},
-		analyticsLocation,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create tool: %w", err)
-	}
-
-	return funcTool, nil
-}
-
 type analyticsLocationInput struct {
 	// Output from search_agent (tool: search_location)
 	PropertyType string `json:"propertyType" description:"propertyType from search"`
 	LocationType string `json:"locationType" description:"locationType from search"`
 	LocationIDs  string `json:"locationIDs"  description:"locationIDs from search"`
 	Radius       string `json:"radius"       description:"radius from search as a string (e.g. '1000', '2000'). always send as a quoted string, never as a number"`
+	ClientType   string `json:"clientType"  description:"clientType from search"`
 }
 
 type analyticsLocationOutput struct {
-	ProjectIDs string `json:"projectIds"`
+	PropertyType string `json:"propertyType"`
+	LocationType string `json:"locationType"`
+	LocationIDs  string `json:"locationIDs"`
+	Radius       string `json:"radius"`
+	ClientType   string `json:"clientType"`
+
+	SuggestionProjectIDs string `json:"suggestionProjectIds"`
 }
 
-func analyticsLocation(ctx tool.Context, input analyticsLocationInput) (analyticsLocationOutput, error) {
-	return analyticsLocationOutput{
-		ProjectIDs: "100,200,300",
-	}, nil
-}
-
-// ================= Tool summary_location ======================
-func newSummaryLocationTool() (tool.Tool, error) {
+func newAnalyticsLocationTool() (tool.Tool, error) {
 	funcTool, err := functiontool.New(
 		functiontool.Config{
-			Name:        "summary_location",
-			Description: "Summary Location",
+			Name:        "analytics_location",
+			Description: "Analytics Location",
 		},
-		summaryLocation,
+		func(ctx tool.Context, input analyticsLocationInput) (analyticsLocationOutput, error) {
+			result := analyticsLocationOutput{
+				PropertyType: input.PropertyType,
+				LocationType: input.LocationType,
+				Radius:       input.Radius,
+				LocationIDs:  input.LocationIDs,
+				ClientType:   input.ClientType,
+
+				SuggestionProjectIDs: "100,200,300",
+			}
+
+			return result, nil
+		},
 	)
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to create tool: %w", err)
 	}
@@ -101,22 +155,57 @@ func newSummaryLocationTool() (tool.Tool, error) {
 	return funcTool, nil
 }
 
+// ================= Tool summary_location ======================
+
 type summaryLocationInput struct {
-	// Output from search_agent (tool: analytics_location)
+	// Output from analytics_agent (tool: analytics_location)
+	PropertyType         string `json:"propertyType" description:"propertyType from analytics_agent"`
+	LocationType         string `json:"locationType" description:"locationType from analytics_agent"`
+	LocationIDs          string `json:"locationIDs" description:"locationIDs from analytics_agent"`
+	Radius               string `json:"radius" description:"radius from analytics_agent"`
+	ClientType           string `json:"clientType" description:"clientType from analytics_agent"`
+	SuggestionProjectIDs string `json:"suggestionProjectIds" description:"suggestionProjectIds from analytics_agent"`
+
+	// New Input
 	ProjectID string `json:"projectId" description:"the project ID as a string (e.g. '100', '200'). always send as a quoted string, never as a number"`
 	Action    string `json:"action" description:"action to perform on the project. supported values: export_pdf, export_image"`
 }
 
 type summaryLocationOutput struct {
+	PropertyType         string `json:"propertyType"`
+	LocationType         string `json:"locationType"`
+	LocationIDs          string `json:"locationIDs"`
+	Radius               string `json:"radius"`
+	ClientType           string `json:"ClientType"`
+	SuggestionProjectIDs string `json:"suggestionProjectIds"`
+
 	Action    string `json:"action"`
-	Message   string `json:"message"`
 	ProjectID string `json:"projectId"`
+	Message   string `json:"message"`
 }
 
-func summaryLocation(ctx tool.Context, input summaryLocationInput) (summaryLocationOutput, error) {
-	return summaryLocationOutput{
-		Action:    input.Action,
-		ProjectID: input.ProjectID,
-		Message:   fmt.Sprintf("[%s]: Project: %s", input.Action, input.ProjectID),
-	}, nil
+func newSummaryLocationTool() (tool.Tool, error) {
+	funcTool, err := functiontool.New(
+		functiontool.Config{
+			Name:        "summary_location",
+			Description: "Summary Location",
+		},
+		func(ctx tool.Context, input summaryLocationInput) (summaryLocationOutput, error) {
+			return summaryLocationOutput{
+				PropertyType: input.PropertyType,
+				LocationType: input.LocationType,
+				LocationIDs:  input.LocationIDs,
+				Radius:       input.Radius,
+				ClientType:   input.ClientType,
+				Action:       input.Action,
+				ProjectID:    input.ProjectID,
+				Message:      fmt.Sprintf("[%s]: Project: %s", input.Action, input.ProjectID),
+			}, nil
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create tool: %w", err)
+	}
+
+	return funcTool, nil
 }

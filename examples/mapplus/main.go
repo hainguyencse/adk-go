@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"strings"
 	"sync"
-	"time"
 
 	adkagent "google.golang.org/adk/agent"
 	mapplusagent "google.golang.org/adk/examples/mapplus/agent"
@@ -184,18 +183,6 @@ func (s *Server) upstreamTask(ctx context.Context, conn *websocket.Conn, queue *
 	}
 }
 
-const maxReconnectAttempts = 3
-
-func isRetryableError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	// Gemini Live API intermittent websocket close errors
-	return strings.Contains(msg, "websocket: close 1008") ||
-		strings.Contains(msg, "websocket: close 1011")
-}
-
 func (s *Server) downstreamTask(
 	ctx context.Context,
 	conn *websocket.Conn,
@@ -204,7 +191,6 @@ func (s *Server) downstreamTask(
 	queue *adkagent.LiveRequestQueue,
 	runConfig adkagent.RunConfig,
 ) {
-	attempt := 0
 	for {
 		if ctx.Err() != nil {
 			return
@@ -219,9 +205,6 @@ func (s *Server) downstreamTask(
 				sendError(conn, err.Error())
 				continue
 			}
-
-			// Reset attempt counter on successful events
-			attempt = 0
 
 			if event == nil {
 				continue
@@ -287,21 +270,18 @@ func (s *Server) downstreamTask(
 			continue
 		}
 
-		// Retryable error — reconnect with backoff
-		if isRetryableError(lastErr) && attempt < maxReconnectAttempts {
-			attempt++
-			delay := time.Duration(attempt) * time.Second
-			log.Printf("Gemini Live API disconnected (attempt %d/%d), reconnecting in %v...", attempt, maxReconnectAttempts, delay)
-			sendError(conn, "Reconnecting...")
-			time.Sleep(delay)
-			continue
-		}
+		// Take note:
+		// Why causes 1011
+		// The Gemini Live server receives a single massive user turn containing the entire session history as text
+		// (all tool calls, all responses, all agent outputs).
+		// There are zero model turns mixed in — the conversation structure is completely flat.
+		// Round 1: [user] = tiny → SendClientContent tiny → OK ✓
+		// Round 2: [user] = entire round 1 history merged into one → server fails internally → 1011 ✗
+		// It's not just size — it's that a valid conversation for Gemini Live needs interleaved user/model turns.
+		// Sending one massive user-role blob with no model turns violates the expected conversation structure.
+		// The 16-second delay before 1011 is the server trying to process it before giving up.
+		fmt.Println("downstream error", lastErr)
 
-		// Not retryable or max attempts reached — exit
-		if attempt >= maxReconnectAttempts {
-			log.Printf("Max reconnect attempts (%d) reached, giving up", maxReconnectAttempts)
-			sendError(conn, "Connection lost after multiple retries. Please refresh to restart.")
-		}
 		return
 	}
 }
