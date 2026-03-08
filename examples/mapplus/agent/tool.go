@@ -55,26 +55,21 @@ func newRestartSequenceTool() (tool.Tool, error) {
 
 // ================= Tool search_location ======================
 type searchLocationInput struct {
-	PropertyType string `json:"propertyType,omitempty" description:"the property type"`
+	// Search nearby
 	LocationType string `json:"locationType" description:"the location type"`
 	Keyword      string `json:"keyword,omitempty" description:"search keyword location"`
 	Radius       string `json:"radius,omitempty" description:"search radius"`
 
-	// ClientType Options:
-	// - buyer
-	// - seller
-	// - landlord
-	// - tenant
-	// - general_investor
-	ClientType string `json:"clientType" description:"clientType is required. Detect client type before analytics"`
+	// Filter
+	PropertyType string `json:"propertyType,omitempty" description:"the property type"`
 }
 
 type searchLocationOutput struct {
-	PropertyType string `json:"propertyType"`
 	LocationType string `json:"locationType"`
 	LocationIDs  string `json:"locationIDs"`
 	Radius       string `json:"radius"`
-	ClientType   string `json:"clientType"`
+
+	PropertyType string `json:"propertyType"`
 }
 
 func newSearchLocationTool() (tool.Tool, error) {
@@ -90,11 +85,10 @@ func newSearchLocationTool() (tool.Tool, error) {
 			}
 
 			result := searchLocationOutput{
-				PropertyType: input.PropertyType,
 				LocationType: input.LocationType,
 				LocationIDs:  input.Keyword,
-				ClientType:   input.ClientType,
 				Radius:       radius,
+				PropertyType: input.PropertyType,
 			}
 
 			return result, nil
@@ -110,19 +104,28 @@ func newSearchLocationTool() (tool.Tool, error) {
 // ================= Tool analytics_location ======================
 type analyticsLocationInput struct {
 	// Output from search_agent (tool: search_location)
-	PropertyType string `json:"propertyType" description:"propertyType from search"`
 	LocationType string `json:"locationType" description:"locationType from search"`
 	LocationIDs  string `json:"locationIDs"  description:"locationIDs from search"`
 	Radius       string `json:"radius"       description:"radius from search as a string (e.g. '1000', '2000'). always send as a quoted string, never as a number"`
-	ClientType   string `json:"clientType"  description:"clientType from search"`
+
+	PropertyType string `json:"propertyType" description:"propertyType from search"`
+
+	// New Input
+	// InvestmentGoal options:
+	// - renting
+	// - long_term_investment
+	// - own_stay
+	InvestmentGoal string `json:"investmentGoal" description:"user investment goal"`
 }
 
 type analyticsLocationOutput struct {
-	PropertyType string `json:"propertyType"`
 	LocationType string `json:"locationType"`
 	LocationIDs  string `json:"locationIDs"`
 	Radius       string `json:"radius"`
-	ClientType   string `json:"clientType"`
+
+	PropertyType string `json:"propertyType"`
+
+	InvestmentGoal string `json:"investmentGoal"`
 
 	SuggestionProjectIDs string `json:"suggestionProjectIds"`
 }
@@ -135,11 +138,11 @@ func newAnalyticsLocationTool() (tool.Tool, error) {
 		},
 		func(ctx tool.Context, input analyticsLocationInput) (analyticsLocationOutput, error) {
 			result := analyticsLocationOutput{
-				PropertyType: input.PropertyType,
-				LocationType: input.LocationType,
-				Radius:       input.Radius,
-				LocationIDs:  input.LocationIDs,
-				ClientType:   input.ClientType,
+				PropertyType:   input.PropertyType,
+				LocationType:   input.LocationType,
+				Radius:         input.Radius,
+				LocationIDs:    input.LocationIDs,
+				InvestmentGoal: input.InvestmentGoal,
 
 				SuggestionProjectIDs: "100,200,300",
 			}
@@ -163,7 +166,7 @@ type summaryLocationInput struct {
 	LocationType         string `json:"locationType" description:"locationType from analytics_agent"`
 	LocationIDs          string `json:"locationIDs" description:"locationIDs from analytics_agent"`
 	Radius               string `json:"radius" description:"radius from analytics_agent"`
-	ClientType           string `json:"clientType" description:"clientType from analytics_agent"`
+	InvestmentGoal       string `json:"investmentGoal" description:"investmentGoal from analytics_agent"`
 	SuggestionProjectIDs string `json:"suggestionProjectIds" description:"suggestionProjectIds from analytics_agent"`
 
 	// New Input
@@ -176,7 +179,7 @@ type summaryLocationOutput struct {
 	LocationType         string `json:"locationType"`
 	LocationIDs          string `json:"locationIDs"`
 	Radius               string `json:"radius"`
-	ClientType           string `json:"ClientType"`
+	InvestmentGoal       string `json:"investmentGoal"`
 	SuggestionProjectIDs string `json:"suggestionProjectIds"`
 
 	Action    string `json:"action"`
@@ -192,14 +195,14 @@ func newSummaryLocationTool() (tool.Tool, error) {
 		},
 		func(ctx tool.Context, input summaryLocationInput) (summaryLocationOutput, error) {
 			return summaryLocationOutput{
-				PropertyType: input.PropertyType,
-				LocationType: input.LocationType,
-				LocationIDs:  input.LocationIDs,
-				Radius:       input.Radius,
-				ClientType:   input.ClientType,
-				Action:       input.Action,
-				ProjectID:    input.ProjectID,
-				Message:      fmt.Sprintf("[%s]: Project: %s", input.Action, input.ProjectID),
+				PropertyType:   input.PropertyType,
+				LocationType:   input.LocationType,
+				LocationIDs:    input.LocationIDs,
+				Radius:         input.Radius,
+				InvestmentGoal: input.InvestmentGoal,
+				Action:         input.Action,
+				ProjectID:      input.ProjectID,
+				Message:        fmt.Sprintf("[%s]: Project: %s", input.Action, input.ProjectID),
 			}, nil
 		},
 	)
