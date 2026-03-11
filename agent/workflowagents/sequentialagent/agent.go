@@ -111,7 +111,6 @@ func sequentialRunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 			return
 		}
 
-		fmt.Println("[sequentialRunLive] start sequences")
 		for _, subAgent := range subAgents {
 			// Clear resumption handle between sub-agents since each gets a fresh
 			// live session with different tools/instructions.
@@ -128,8 +127,6 @@ func sequentialRunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 				}
 			}
 		}
-
-		fmt.Println("[sequentialRunLive] end sequences")
 	}
 }
 

@@ -310,7 +310,6 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequ
 		}
 
 		agentToRun, err := r.findAgentToRunFromLastEvent(storedSession, r.rootAgent)
-		fmt.Println("agentToRun: ", agentToRun.Name())
 		if err != nil {
 			yield(nil, err)
 			return
@@ -504,7 +503,7 @@ func (r *Runner) findAgentToRun(session session.Session, msg *genai.Content) (ag
 		subAgent := findAgent(r.rootAgent, event.Author)
 		// Agent not found, continue looking for the other event.
 		if subAgent == nil {
-			log.Printf("Event from an unknown agent: %s, event id: %s", event.Author, event.ID)
+			// Event from unknown agent, continue looking for the other event.
 			continue
 		}
 
@@ -533,7 +532,7 @@ func (r *Runner) findAgentToRunFromLastEvent(session session.Session, rootAgent 
 		subAgent := findAgent(r.rootAgent, event.Author)
 		// Agent not found, continue looking for the other event.
 		if subAgent == nil {
-			log.Printf("Event from an unknown agent: %s, event id: %s", event.Author, event.ID)
+			// Event from unknown agent, continue looking for the other event.
 			continue
 		}
 

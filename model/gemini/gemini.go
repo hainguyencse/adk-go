@@ -141,10 +141,3 @@ func (m *geminiModel) maybeAppendUserContent(req *model.LLMRequest) {
 		req.Contents = append(req.Contents, genai.NewContentFromText("Continue processing previous requests as instructed. Exit or provide a summary if no more outputs are needed.", "user"))
 	}
 }
-
-// func (m *geminiModel) Connect(ctx context.Context, req *model.LLMRequest) (*genai.Session, error) {
-// 	fmt.Println("req.ResponseModalities =>", req.LiveConnectConfig.ResponseModalities)
-// 	fmt.Println("req.SpeechConfig =>", req.LiveConnectConfig.SpeechConfig)
-
-// 	return m.client.Live.Connect(ctx, m.name, req.LiveConnectConfig)
-// }

@@ -261,16 +261,13 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 								}
 
 								if err := f.AudioCacheManager.CacheAudio(ctx, audioBlob, "output"); err != nil {
-									fmt.Println("Cached Audio Failed")
+									// TODO: handle error
 								}
-
-								fmt.Println("Cached Audio Blob Length", len(audioBlob.Data))
 							}
 
 							liveCh <- liveResult{event: ev}
 
 							if ev != nil && ev.Actions.TransferToAgent != "" {
-								fmt.Println("RunLive.TransferToAgent", ev.Actions.TransferToAgent)
 								transferAgentCh <- ev.Actions.TransferToAgent
 								return
 							}
@@ -284,7 +281,6 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 
 					case err, ok := <-errs:
 						if !ok {
-							fmt.Println("error channel is closed. returning")
 							return
 						}
 						if err != nil {
@@ -297,7 +293,6 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 								return
 							}
 
-							fmt.Println("Run Live Receiver - err: ", err)
 							liveCh <- liveResult{err: err}
 							return
 						}
@@ -350,7 +345,6 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 					// it must start a fresh Gemini Live session.
 					ctx.SetLiveSessionResumptionHandle("")
 
-					fmt.Printf("Transfer to agent: %s\n", agentName)
 					nextAgent := f.agentToRun(ctx, agentName)
 					if nextAgent == nil {
 						yield(nil, fmt.Errorf("failed to find agent: %s", agentName))
@@ -385,7 +379,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 							strings.HasPrefix(liveReq.Realtime.Audio.MIMEType, "audio/") {
 							err := f.AudioCacheManager.CacheAudio(ctx, liveReq.Realtime.Audio, "input")
 							if err != nil {
-								fmt.Println("AudioCacheManager.CacheAudio input error", err)
+								// TODO: handle error
 							}
 						}
 
@@ -1137,13 +1131,13 @@ func (f *Flow) handleControlEventFlush(ctx agent.InvocationContext, llmResponse 
 	if llmResponse.Interrupted {
 		events, err := f.AudioCacheManager.FlushCaches(ctx, false, true)
 		if err != nil {
-			fmt.Println("failed to flush audio caches")
+			// TODO: handle error
 		}
 		return events
 	} else if llmResponse.TurnComplete {
 		events, err := f.AudioCacheManager.FlushCaches(ctx, true, true)
 		if err != nil {
-			fmt.Println("failed to flush audio caches")
+			// TODO: handle error
 		}
 		return events
 	}
