@@ -34,7 +34,6 @@ import (
 	"google.golang.org/adk/internal/llminternal"
 	imemory "google.golang.org/adk/internal/memory"
 	"google.golang.org/adk/internal/plugininternal"
-	"google.golang.org/adk/internal/sessioninternal"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
@@ -63,6 +62,19 @@ type Config struct {
 type PluginConfig struct {
 	Plugins      []*plugin.Plugin
 	CloseTimeout time.Duration
+}
+
+type RunOption func(*runOptions)
+
+type runOptions struct {
+	stateDelta map[string]any
+}
+
+// WithStateDelta sets a state delta for the run invocation.
+func WithStateDelta(delta map[string]any) RunOption {
+	return func(o *runOptions) {
+		o.stateDelta = delta
+	}
 }
 
 // New creates a new [Runner].
@@ -119,11 +131,16 @@ type Runner struct {
 // Run runs the agent for the given user input, yielding events from agents.
 // For each user message it finds the proper agent within an agent tree to
 // continue the conversation within the session.
-func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig) iter.Seq2[*session.Event, error] {
+func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig, opts ...RunOption) iter.Seq2[*session.Event, error] {
 	// TODO(hakim): we need to validate whether cfg is compatible with the Agent.
 	//   see adk-python/src/google/adk/runners.py Runner._new_invocation_context.
 	// TODO: setup tracer.
 	return func(yield func(*session.Event, error) bool) {
+		options := runOptions{}
+		for _, opt := range opts {
+			opt(&options)
+		}
+
 		resp, err := r.sessionService.Get(ctx, &session.GetRequest{
 			AppName:   r.appName,
 			UserID:    userID,
@@ -171,12 +188,12 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		ctx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 			Artifacts:   artifacts,
 			Memory:      memoryImpl,
-			Session:     sessioninternal.NewMutableSession(r.sessionService, storedSession),
+			Session:     storedSession,
 			Agent:       agentToRun,
 			UserContent: msg,
 			RunConfig:   &cfg,
 		})
-		ctx, err = r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager)
+		ctx, err = r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager, options.stateDelta)
 		if err != nil {
 			yield(nil, err)
 			return
@@ -428,7 +445,8 @@ func (r *Runner) newInvocationContextForLive(ctx context.Context, userID, sessio
 	return invCtx
 }
 
-func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool, pluginManager *plugininternal.PluginManager) (agent.InvocationContext, error) {
+// func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool, pluginManager *plugininternal.PluginManager) (agent.InvocationContext, error) {
+func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool, pluginManager *plugininternal.PluginManager, stateDelta map[string]any) (agent.InvocationContext, error) {
 	if msg == nil {
 		return ctx, nil
 	}
@@ -474,6 +492,9 @@ func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSessi
 	event.Author = "user"
 	event.LLMResponse = model.LLMResponse{
 		Content: msg,
+	}
+	if stateDelta != nil {
+		event.Actions.StateDelta = stateDelta
 	}
 
 	if err := r.sessionService.AppendEvent(ctx, storedSession, event); err != nil {

@@ -92,6 +92,16 @@ type A2AConfig struct {
 	// callbacks will be skipped.
 	AfterAgentCallbacks []agent.AfterAgentCallback
 
+	// A2APartConverter is a custom converter for converting A2A parts to GenAI parts.
+	// Implementations should generally remember to leverage adka2a.ToGenAiPart for default conversions
+	// nil returns are considered intentionally dropped parts.
+	A2APartConverter adka2a.A2APartConverter
+
+	// GenAIPartConverter is a custom converter for converting GenAI parts to A2A parts.
+	// Implementations should generally remember to leverage adka2a.ToA2APart for default conversions
+	// nil returns are considered intentionally dropped parts.
+	GenAIPartConverter adka2a.GenAIPartConverter
+
 	// ClientFactory can be used to provide a set of a2aclient.Client configurations.
 	ClientFactory *a2aclient.Factory
 	// MessageSendConfig is attached to a2a.MessageSendParams sent on every agent invocation.
@@ -142,7 +152,7 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 		}
 		defer destroy(client)
 
-		msg, err := newMessage(ctx)
+		msg, err := newMessage(ctx, cfg)
 		if err != nil {
 			yield(toErrorEvent(ctx, fmt.Errorf("message creation failed: %w", err)), nil)
 			return
@@ -170,13 +180,13 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 			return
 		}
 
-		processEvent := func(aEvent a2a.Event, aErr error) bool {
+		processEvent := func(a2aEvent a2a.Event, a2aErr error) bool {
 			var err error
 			var event *session.Event
 			if cfg.Converter != nil {
-				event, err = cfg.Converter(icontext.NewReadonlyContext(ctx), req, aEvent, aErr)
+				event, err = cfg.Converter(icontext.NewReadonlyContext(ctx), req, a2aEvent, a2aErr)
 			} else {
-				event, err = processor.convertToSessionEvent(ctx, aEvent, aErr)
+				event, err = processor.convertToSessionEvent(ctx, a2aEvent, a2aErr)
 			}
 
 			if cbResp, cbErr := processor.runAfterA2ARequestCallbacks(ctx, event, err); cbResp != nil || cbErr != nil {
@@ -192,13 +202,10 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 			}
 
 			if event != nil { // an event might be skipped
-				if intermediate := processor.aggregatePartial(ctx, event); intermediate != nil {
-					if !yield(intermediate, nil) {
+				for _, toEmit := range processor.aggregatePartial(ctx, a2aEvent, event) {
+					if !yield(toEmit, nil) {
 						return false
 					}
-				}
-				if !yield(event, nil) {
-					return false
 				}
 			}
 			return true
@@ -218,13 +225,13 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 	}
 }
 
-func newMessage(ctx agent.InvocationContext) (*a2a.Message, error) {
+func newMessage(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.Message, error) {
 	events := ctx.Session().Events()
 	if userFnCall := getUserFunctionCallAt(events, events.Len()-1); userFnCall != nil {
 		event := userFnCall.response
-		parts, err := adka2a.ToA2AParts(event.Content.Parts, event.LongRunningToolIDs)
+		parts, err := convertParts(ctx, cfg, event)
 		if err != nil {
-			return nil, fmt.Errorf("event part conversion failed: %w", err)
+			return nil, err
 		}
 		msg := a2a.NewMessage(a2a.MessageRoleUser, parts...)
 		msg.TaskID = userFnCall.taskID
@@ -232,7 +239,7 @@ func newMessage(ctx agent.InvocationContext) (*a2a.Message, error) {
 		return msg, nil
 	}
 
-	parts, contextID := toMissingRemoteSessionParts(ctx, events)
+	parts, contextID := toMissingRemoteSessionParts(ctx, events, cfg)
 	msg := a2a.NewMessage(a2a.MessageRoleUser, parts...)
 	msg.ContextID = contextID
 	return msg, nil
@@ -241,9 +248,8 @@ func newMessage(ctx agent.InvocationContext) (*a2a.Message, error) {
 func toErrorEvent(ctx agent.InvocationContext, err error) *session.Event {
 	event := adka2a.NewRemoteAgentEvent(ctx)
 	event.ErrorMessage = err.Error()
-	event.CustomMetadata = map[string]any{
-		adka2a.ToADKMetaKey("error"): err.Error(),
-	}
+	event.CustomMetadata = map[string]any{adka2a.ToADKMetaKey("error"): err.Error()}
+	event.TurnComplete = true
 	return event
 }
 
@@ -270,6 +276,28 @@ func resolveAgentCard(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.AgentCar
 		return nil, fmt.Errorf("failed to unmarshal an agent card: %w", err)
 	}
 	return &card, nil
+}
+
+func convertParts(ctx agent.InvocationContext, cfg A2AConfig, event *session.Event) ([]a2a.Part, error) {
+	parts := make([]a2a.Part, 0, len(event.Content.Parts))
+	if cfg.GenAIPartConverter != nil {
+		for _, part := range event.Content.Parts {
+			cp, err := cfg.GenAIPartConverter(ctx, event, part)
+			if err != nil {
+				return nil, err
+			}
+			if cp != nil {
+				parts = append(parts, cp)
+			}
+		}
+	} else {
+		var err error
+		parts, err = adka2a.ToA2AParts(event.Content.Parts, event.LongRunningToolIDs)
+		if err != nil {
+			return nil, fmt.Errorf("event part conversion failed: %w", err)
+		}
+	}
+	return parts, nil
 }
 
 func destroy(client *a2aclient.Client) {

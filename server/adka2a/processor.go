@@ -26,6 +26,11 @@ import (
 	"google.golang.org/adk/session"
 )
 
+type eventToArtifactTransform interface {
+	transform(event *session.Event, parts []a2a.Part, meta map[string]any) (*a2a.TaskArtifactUpdateEvent, error)
+	makeFinalUpdate() *a2a.TaskArtifactUpdateEvent
+}
+
 type eventProcessor struct {
 	reqCtx        *a2asrv.RequestContext
 	meta          invocationMeta
@@ -36,9 +41,6 @@ type eventProcessor struct {
 	// This is done to make sure the caller processes it, since intermediate events without parts might be ignored.
 	terminalActions session.EventActions
 
-	// responseID is created once the first TaskArtifactUpdateEvent is sent. Used for subsequent artifact updates.
-	responseID a2a.ArtifactID
-
 	// failedEvent is used to postpone sending a terminal event until the whole ADK response is saved as an A2A artifact.
 	// Will be sent as the final Task status update if not nil.
 	failedEvent *a2a.TaskStatusUpdateEvent
@@ -46,18 +48,23 @@ type eventProcessor struct {
 	// inputRequiredProcessor is used to postpone sending input-required in response to long-running function tool calls.
 	// inputRequiredProcessor.event will be sent as the final Task status update if failedEvent is nil.
 	inputRequiredProcessor *inputRequiredProcessor
+
+	// eventToArtifact is used to convert ADK events to A2A TaskArtifactUpdateEvents.
+	eventToArtifact eventToArtifactTransform
 }
 
 func newEventProcessor(
 	reqCtx *a2asrv.RequestContext,
 	meta invocationMeta,
 	converter GenAIPartConverter,
+	transform eventToArtifactTransform,
 ) *eventProcessor {
 	return &eventProcessor{
 		inputRequiredProcessor: newInputRequiredProcessor(reqCtx),
 		partConverter:          converter,
 		reqCtx:                 reqCtx,
 		meta:                   meta,
+		eventToArtifact:        transform,
 	}
 }
 
@@ -74,7 +81,7 @@ func (p *eventProcessor) process(ctx context.Context, event *session.Event) (*a2
 	}
 
 	resp := event.LLMResponse
-	if resp.ErrorCode != "" {
+	if resp.ErrorCode != "" || resp.ErrorMessage != "" {
 		// TODO(yarolegovich): consider merging responses if multiple errors can be produced during an invocation
 		if p.failedEvent == nil {
 			// terminal event might add additional keys to its metadata when it's dispatched and these changes should
@@ -84,7 +91,8 @@ func (p *eventProcessor) process(ctx context.Context, event *session.Event) (*a2
 		}
 	}
 
-	if err := p.inputRequiredProcessor.process(event); err != nil {
+	event, err = p.inputRequiredProcessor.process(event)
+	if err != nil {
 		return nil, fmt.Errorf("input required processing failed: %w", err)
 	}
 
@@ -96,31 +104,16 @@ func (p *eventProcessor) process(ctx context.Context, event *session.Event) (*a2
 		return nil, nil
 	}
 
-	if event.Partial {
-		updatePartsMetadata(parts, map[string]any{ToA2AMetaKey("partial"): true})
-	}
-
-	var result *a2a.TaskArtifactUpdateEvent
-	if p.responseID == "" {
-		result = a2a.NewArtifactEvent(p.reqCtx, parts...)
-		p.responseID = result.Artifact.ID
-	} else {
-		result = a2a.NewArtifactUpdateEvent(p.reqCtx, p.responseID, parts...)
-	}
-	if len(eventMeta) > 0 {
-		result.Metadata = eventMeta
+	result, err := p.eventToArtifact.transform(event, parts, eventMeta)
+	if err != nil {
+		return nil, err
 	}
 
 	return result, nil
 }
 
-func (p *eventProcessor) makeFinalArtifactUpdate() (*a2a.TaskArtifactUpdateEvent, bool) {
-	if p.responseID == "" {
-		return nil, false
-	}
-	ev := a2a.NewArtifactUpdateEvent(p.reqCtx, p.responseID)
-	ev.LastChunk = true
-	return ev, true
+func (p *eventProcessor) makeFinalArtifactUpdate() *a2a.TaskArtifactUpdateEvent {
+	return p.eventToArtifact.makeFinalUpdate()
 }
 
 func (p *eventProcessor) makeFinalStatusUpdate() *a2a.TaskStatusUpdateEvent {

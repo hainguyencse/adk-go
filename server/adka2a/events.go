@@ -15,6 +15,7 @@
 package adka2a
 
 import (
+	"context"
 	"fmt"
 	"maps"
 
@@ -63,36 +64,62 @@ func EventToMessage(event *session.Event) (*a2a.Message, error) {
 
 // ToSessionEvent converts the provided a2a event to session event authored by the agent running in the provided invocation context.
 func ToSessionEvent(ctx agent.InvocationContext, event a2a.Event) (*session.Event, error) {
+	return ToSessionEventWithParts(ctx, event, nil)
+}
+
+// ToSessionEventWithParts converts the provided a2a event to session event with custom part converter.
+func ToSessionEventWithParts(ctx agent.InvocationContext, event a2a.Event, partConverter A2APartConverter) (*session.Event, error) {
+	if partConverter == nil {
+		partConverter = func(ctx context.Context, a2aEvent a2a.Event, part a2a.Part) (*genai.Part, error) {
+			return ToGenAIPart(part)
+		}
+	}
 	switch v := event.(type) {
 	case *a2a.Task:
-		return taskToEvent(ctx, v)
+		return taskToEvent(ctx, v, partConverter)
 
 	case *a2a.Message:
-		return messageToEvent(ctx, v)
+		return messageToEvent(ctx, v, partConverter)
 
 	case *a2a.TaskArtifactUpdateEvent:
 		if len(v.Artifact.Parts) == 0 {
 			return nil, nil
 		}
-		event, err := artifactToEvent(ctx, v.Artifact)
+		if IsPartial(v.Metadata) && v.LastChunk {
+			// Partial ADK artifact reset
+			return nil, nil
+		}
+		event, err := artifactUpdateEventToEvent(ctx, v, partConverter)
 		if err != nil {
 			return nil, fmt.Errorf("artifact update event conversion failed: %w", err)
+		}
+		if len(event.Content.Parts) == 0 {
+			return nil, nil
 		}
 		event.LongRunningToolIDs = getLongRunningToolIDs(v.Artifact.Parts, event.Content.Parts)
 		if err := processA2AMeta(v, event); err != nil {
 			return nil, fmt.Errorf("metadata processing failed: %w", err)
 		}
-		event.Partial = true
+		if partial, ok := v.Metadata[metadataPartialKey].(bool); ok {
+			event.Partial = partial
+		} else {
+			// append=false, lastChunk=false: emitted as partial, caller restarts aggregation
+			// append=false, lastChunk=true: emitted as non partial, caller drops aggregation
+			// append=true, lastChunk=false: emitted as partial, caller updates aggregation
+			// append=true, lastChunk=true: emitted as partial, caller updates and emits aggregation as non-partial
+			event.Partial = v.Append || !v.LastChunk
+		}
 		return event, nil
 
 	case *a2a.TaskStatusUpdateEvent:
 		if v.Final {
-			return finalTaskStatusUpdateToEvent(ctx, v)
+			return finalTaskStatusUpdateToEvent(ctx, v, partConverter)
 		}
 		if v.Status.Message == nil {
 			return nil, nil
 		}
-		event, err := messageToEvent(ctx, v.Status.Message)
+		event, err := messageToEvent(ctx, v.Status.Message, partConverter)
+		event.TurnComplete = false
 		if err != nil {
 			return nil, fmt.Errorf("custom metadata conversion failed: %w", err)
 		}
@@ -144,7 +171,7 @@ func GetA2ATaskInfo(event *session.Event) (a2a.TaskID, string) {
 	return taskID, contextID
 }
 
-func messageToEvent(ctx agent.InvocationContext, msg *a2a.Message) (*session.Event, error) {
+func messageToEvent(ctx agent.InvocationContext, msg *a2a.Message, partConverter A2APartConverter) (*session.Event, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("InvocationContext not provided")
 	}
@@ -152,9 +179,15 @@ func messageToEvent(ctx agent.InvocationContext, msg *a2a.Message) (*session.Eve
 		return nil, nil
 	}
 
-	parts, err := ToGenAIParts(msg.Parts)
-	if err != nil {
-		return nil, err
+	var parts []*genai.Part
+	for _, part := range msg.Parts {
+		genaiPart, err := partConverter(ctx, msg, part)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert message part: %w", err)
+		}
+		if genaiPart != nil {
+			parts = append(parts, genaiPart)
+		}
 	}
 
 	event := NewRemoteAgentEvent(ctx)
@@ -164,17 +197,21 @@ func messageToEvent(ctx agent.InvocationContext, msg *a2a.Message) (*session.Eve
 	if err := processA2AMeta(msg, event); err != nil {
 		return nil, fmt.Errorf("metadata processing failed: %w", err)
 	}
+	event.TurnComplete = true
 	return event, nil
 }
 
-func artifactToEvent(ctx agent.InvocationContext, artifact *a2a.Artifact) (*session.Event, error) {
+func artifactUpdateEventToEvent(ctx agent.InvocationContext, update *a2a.TaskArtifactUpdateEvent, partConverter A2APartConverter) (*session.Event, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("InvocationContext not provided")
 	}
+	if update == nil {
+		return nil, nil
+	}
 
-	parts, err := ToGenAIParts(artifact.Parts)
+	parts, err := convertParts(ctx, update, update.Artifact.Parts, partConverter)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to convert artifact parts: %w", err)
 	}
 
 	event := NewRemoteAgentEvent(ctx)
@@ -182,7 +219,7 @@ func artifactToEvent(ctx agent.InvocationContext, artifact *a2a.Artifact) (*sess
 	return event, nil
 }
 
-func taskToEvent(ctx agent.InvocationContext, task *a2a.Task) (*session.Event, error) {
+func taskToEvent(ctx agent.InvocationContext, task *a2a.Task, partConverter A2APartConverter) (*session.Event, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("InvocationContext not provided")
 	}
@@ -190,10 +227,11 @@ func taskToEvent(ctx agent.InvocationContext, task *a2a.Task) (*session.Event, e
 	var parts []*genai.Part
 	var longRunningToolIDs []string
 	for _, artifact := range task.Artifacts {
-		artifactParts, err := ToGenAIParts(artifact.Parts)
+		artifactParts, err := convertParts(ctx, task, artifact.Parts, partConverter)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert artifact parts: %w", err)
 		}
+
 		lrtIDs := getLongRunningToolIDs(artifact.Parts, artifactParts)
 
 		parts = append(parts, artifactParts...)
@@ -203,7 +241,7 @@ func taskToEvent(ctx agent.InvocationContext, task *a2a.Task) (*session.Event, e
 	event := NewRemoteAgentEvent(ctx)
 
 	if task.Status.Message != nil {
-		msgParts, err := ToGenAIParts(task.Status.Message.Parts)
+		msgParts, err := convertParts(ctx, task, task.Status.Message.Parts, partConverter)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert status message parts: %w", err)
 		}
@@ -217,11 +255,10 @@ func taskToEvent(ctx agent.InvocationContext, task *a2a.Task) (*session.Event, e
 		longRunningToolIDs = append(longRunningToolIDs, lrtIDs...)
 	}
 
-	notTerminal := !task.Status.State.Terminal() && task.Status.State != a2a.TaskStateInputRequired
-	if len(parts) == 0 && notTerminal {
+	isTerminal := task.Status.State.Terminal() || task.Status.State == a2a.TaskStateInputRequired
+	if len(parts) == 0 && !isTerminal {
 		return nil, nil
 	}
-
 	if len(parts) > 0 {
 		event.Content = genai.NewContentFromParts(parts, genai.RoleModel)
 	}
@@ -231,10 +268,11 @@ func taskToEvent(ctx agent.InvocationContext, task *a2a.Task) (*session.Event, e
 	if err := processA2AMeta(task, event); err != nil {
 		return nil, fmt.Errorf("metadata processing failed: %w", err)
 	}
+	event.TurnComplete = isTerminal
 	return event, nil
 }
 
-func finalTaskStatusUpdateToEvent(ctx agent.InvocationContext, update *a2a.TaskStatusUpdateEvent) (*session.Event, error) {
+func finalTaskStatusUpdateToEvent(ctx agent.InvocationContext, update *a2a.TaskStatusUpdateEvent, partConverter A2APartConverter) (*session.Event, error) {
 	if update == nil {
 		return nil, nil
 	}
@@ -242,12 +280,12 @@ func finalTaskStatusUpdateToEvent(ctx agent.InvocationContext, update *a2a.TaskS
 	event := NewRemoteAgentEvent(ctx)
 
 	var parts []*genai.Part
+	var err error
 	if update.Status.Message != nil {
-		localParts, err := ToGenAIParts(update.Status.Message.Parts)
+		parts, err = convertParts(ctx, update, update.Status.Message.Parts, partConverter)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to convert status message parts: %w", err)
 		}
-		parts = localParts
 	}
 	if update.Status.State == a2a.TaskStateFailed && len(parts) == 1 && parts[0].Text != "" {
 		event.ErrorMessage = parts[0].Text
@@ -299,4 +337,18 @@ func toEventActions(meta map[string]any) session.EventActions {
 	result.Escalate, _ = meta[metadataEscalateKey].(bool)
 	result.TransferToAgent, _ = meta[metadataTransferToAgentKey].(string)
 	return result
+}
+
+func convertParts(ctx agent.InvocationContext, event a2a.Event, parts []a2a.Part, partConverter A2APartConverter) ([]*genai.Part, error) {
+	var genaiParts []*genai.Part
+	for _, part := range parts {
+		genaiPart, err := partConverter(ctx, event, part)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert part: %w", err)
+		}
+		if genaiPart != nil {
+			genaiParts = append(genaiParts, genaiPart)
+		}
+	}
+	return genaiParts, nil
 }

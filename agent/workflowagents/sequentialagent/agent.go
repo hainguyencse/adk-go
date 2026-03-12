@@ -20,7 +20,6 @@ import (
 	"iter"
 
 	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/workflowagents/loopagent"
 	agentinternal "google.golang.org/adk/internal/agent"
 	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/session"
@@ -65,15 +64,17 @@ func newTaskCompletedTool() (tool.Tool, error) {
 // Use the SequentialAgent when you want the execution to occur in a fixed,
 // strict order.
 func New(cfg Config) (agent.Agent, error) {
-	// Set RunLive before passing to loopagent so it overrides the default.
-	cfg.AgentConfig.RunLive = sequentialRunLive
+	// // Set RunLive before passing to loopagent so it overrides the default.
+	if cfg.AgentConfig.Run != nil {
+		return nil, fmt.Errorf("LoopAgent doesn't allow custom Run implementations")
+	}
 
-	sequentialAgent, err := loopagent.New(loopagent.Config{
-		AgentConfig:   cfg.AgentConfig,
-		MaxIterations: 1,
-	})
+	sequentialAgentImpl := &sequentialAgent{}
+	cfg.AgentConfig.Run = sequentialAgentImpl.Run
+
+	sequentialAgent, err := agent.New(cfg.AgentConfig)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create base agent: %w", err)
 	}
 
 	internalAgent, ok := sequentialAgent.(agentinternal.Agent)
@@ -91,46 +92,6 @@ func New(cfg Config) (agent.Agent, error) {
 type Config struct {
 	// Basic agent setup.
 	AgentConfig agent.Config
-}
-
-// sequentialRunLive implements RunLive for SequentialAgent.
-//
-// Compared to the non-live Run, live agents process a continuous stream of audio
-// or video, so there is no natural end signal. We inject a task_completed() tool
-// into each LlmAgent sub-agent so the model can call it to signal completion,
-// allowing the sequential agent to move to the next sub-agent.
-func sequentialRunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-	return func(yield func(*session.Event, error) bool) {
-		subAgents := ctx.Agent().SubAgents()
-		if len(subAgents) == 0 {
-			return
-		}
-
-		if err := injectTaskCompletedTool(subAgents); err != nil {
-			yield(nil, fmt.Errorf("failed to initialize task_completed tool: %w", err))
-			return
-		}
-
-		fmt.Println("[sequentialRunLive] start sequences")
-		for _, subAgent := range subAgents {
-			// Clear resumption handle between sub-agents since each gets a fresh
-			// live session with different tools/instructions.
-			ctx.SetLiveSessionResumptionHandle("")
-
-			for event, err := range subAgent.RunLive(ctx) {
-				if !yield(event, err) {
-					return
-				}
-				// When task_completed is called, the event has Escalate=true.
-				// Break to move to the next sub-agent.
-				if event != nil && event.Actions.Escalate {
-					break
-				}
-			}
-		}
-
-		fmt.Println("[sequentialRunLive] end sequences")
-	}
 }
 
 // injectTaskCompletedTool adds the task_completed tool and instruction to each
@@ -171,4 +132,53 @@ func injectTaskCompletedTool(subAgents []agent.Agent) error {
 		state.Instruction += taskCompletedInstr
 	}
 	return nil
+}
+
+type sequentialAgent struct{}
+
+func (a *sequentialAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		for _, subAgent := range ctx.Agent().SubAgents() {
+			for event, err := range subAgent.Run(ctx) {
+				// TODO: ensure consistency -- if there's an error, return and close iterator, verify everywhere in ADK.
+				if !yield(event, err) {
+					return
+				}
+			}
+		}
+	}
+}
+
+func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		subAgents := ctx.Agent().SubAgents()
+		if len(subAgents) == 0 {
+			return
+		}
+
+		if err := injectTaskCompletedTool(subAgents); err != nil {
+			yield(nil, fmt.Errorf("failed to initialize task_completed tool: %w", err))
+			return
+		}
+
+		fmt.Println("[sequentialRunLive] start sequences")
+		for _, subAgent := range subAgents {
+			// Clear resumption handle between sub-agents since each gets a fresh
+			// live session with different tools/instructions.
+			ctx.SetLiveSessionResumptionHandle("")
+
+			for event, err := range subAgent.RunLive(ctx) {
+				if !yield(event, err) {
+					return
+				}
+				// When task_completed is called, the event has Escalate=true.
+				// Break to move to the next sub-agent.
+				if event != nil && event.Actions.Escalate {
+					break
+				}
+			}
+		}
+
+		fmt.Println("[sequentialRunLive] end sequences")
+	}
 }

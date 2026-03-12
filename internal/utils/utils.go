@@ -36,9 +36,14 @@ const afFunctionCallIDPrefix = "adk-"
 func PopulateClientFunctionCallID(c *genai.Content) {
 	for _, fn := range FunctionCalls(c) {
 		if fn.ID == "" {
-			fn.ID = afFunctionCallIDPrefix + uuid.NewString()
+			fn.ID = GenerateFunctionCallID()
 		}
 	}
+}
+
+// GenerateFunctionCallID generates a new function call ID.
+func GenerateFunctionCallID() string {
+	return afFunctionCallIDPrefix + uuid.NewString()
 }
 
 // RemoveClientFunctionCallID removes the function call ID field that was set
@@ -126,6 +131,7 @@ func Must[T agent.Agent](a T, err error) T {
 	return a
 }
 
+// AppendInstructions appends instructions to the [genai.GenerateContentConfig.SystemInstruction] system instruction.
 func AppendInstructions(r *model.LLMRequest, instructions ...string) {
 	if len(instructions) == 0 {
 		return
@@ -143,9 +149,16 @@ func AppendInstructions(r *model.LLMRequest, instructions ...string) {
 
 	if r.Config.SystemInstruction == nil {
 		r.Config.SystemInstruction = genai.NewContentFromText(inst, genai.RoleUser)
-		r.LiveConnectConfig.SystemInstruction = genai.NewContentFromText(inst, genai.RoleUser)
-	} else {
-		r.Config.SystemInstruction.Parts = append(r.Config.SystemInstruction.Parts, genai.NewPartFromText(inst))
-		r.LiveConnectConfig.SystemInstruction.Parts = append(r.LiveConnectConfig.SystemInstruction.Parts, genai.NewPartFromText(inst))
+		// r.LiveConnectConfig.SystemInstruction = r.Config.SystemInstruction
+		return
 	}
+
+	if len(r.Config.SystemInstruction.Parts) > 0 && r.Config.SystemInstruction.Parts[len(r.Config.SystemInstruction.Parts)-1].Text != "" {
+		r.Config.SystemInstruction.Parts[len(r.Config.SystemInstruction.Parts)-1].Text += "\n\n" + inst
+		// r.LiveConnectConfig.SystemInstruction.Parts[len(r.LiveConnectConfig.SystemInstruction.Parts)-1].Text += "\n\n" + inst
+		return
+	}
+
+	r.Config.SystemInstruction.Parts = append(r.Config.SystemInstruction.Parts, genai.NewPartFromText(inst))
+	// r.LiveConnectConfig.SystemInstruction.Parts = append(r.LiveConnectConfig.SystemInstruction.Parts, genai.NewPartFromText(inst))
 }

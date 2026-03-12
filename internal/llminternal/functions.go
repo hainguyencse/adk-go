@@ -15,8 +15,6 @@
 package llminternal
 
 import (
-	"time"
-
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -63,6 +61,7 @@ func generateRequestConfirmationEvent(
 		}
 
 		requestConfirmationFC := &genai.FunctionCall{
+			ID:   utils.GenerateFunctionCallID(),
 			Name: toolconfirmation.FunctionCallName,
 			Args: args,
 		}
@@ -77,21 +76,15 @@ func generateRequestConfirmationEvent(
 		return nil
 	}
 
-	content := &genai.Content{
-		Parts: parts,
-		Role:  genai.RoleModel,
-	}
-	utils.PopulateClientFunctionCallID(content)
-
-	return &session.Event{
-		InvocationID: invocationContext.InvocationID(),
-		Author:       invocationContext.Agent().Name(),
-		Branch:       invocationContext.Branch(),
-		LLMResponse: model.LLMResponse{
-			Content: content,
+	ev := session.NewEvent(invocationContext.InvocationID())
+	ev.Author = invocationContext.Agent().Name()
+	ev.Branch = invocationContext.Branch()
+	ev.LLMResponse = model.LLMResponse{
+		Content: &genai.Content{
+			Parts: parts,
+			Role:  genai.RoleModel,
 		},
-		Timestamp:          time.Now(),
-		LongRunningToolIDs: longRunningToolIDs,
-		Actions:            session.EventActions{},
 	}
+	ev.LongRunningToolIDs = longRunningToolIDs
+	return ev
 }

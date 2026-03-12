@@ -110,7 +110,12 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	}
 
 	go func() {
-		_ = errGroup.Wait() // this error is already sent to the user via iterator
+		if err := errGroup.Wait(); err != nil {
+			select {
+			case resultsChan <- result{err: err}:
+			case <-doneChan:
+			}
+		}
 		close(resultsChan)
 	}()
 
@@ -118,7 +123,14 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 		defer close(doneChan)
 
 		for res := range resultsChan {
-			if !yield(res.event, res.err) {
+			shouldContinue := yield(res.event, res.err)
+
+			// Signal sub-agent that event processing (including session append) is complete
+			if res.ackChan != nil {
+				close(res.ackChan)
+			}
+
+			if !shouldContinue {
 				break
 			}
 		}
@@ -127,23 +139,28 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 
 func runSubAgent(ctx agent.InvocationContext, agent agent.Agent, results chan<- result, done <-chan bool) error {
 	for event, err := range agent.Run(ctx) {
+		if err != nil {
+			return err
+		}
+
+		ackChan := make(chan struct{})
+
 		select {
 		case <-done:
 			return nil
 		case <-ctx.Done():
-			select {
-			case <-done:
-			case results <- result{
-				err: ctx.Err(),
-			}:
-			}
 			return ctx.Err()
 		case results <- result{
-			event: event,
-			err:   err,
+			event:   event,
+			ackChan: ackChan,
 		}:
-			if err != nil {
-				return err
+			// Wait for runner to finish processing before continuing to next iteration
+			select {
+			case <-ackChan:
+			case <-done:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
 			}
 		}
 	}
@@ -151,6 +168,7 @@ func runSubAgent(ctx agent.InvocationContext, agent agent.Agent, results chan<- 
 }
 
 type result struct {
-	event *session.Event
-	err   error
+	event   *session.Event
+	err     error
+	ackChan chan struct{}
 }
