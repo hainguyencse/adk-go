@@ -263,7 +263,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 								}
 
 								if err := f.AudioCacheManager.CacheAudio(ctx, audioBlob, "output"); err != nil {
-									fmt.Println("Cached Audio Failed")
+									// TODO: handle error
 								}
 							}
 
@@ -381,7 +381,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 							strings.HasPrefix(liveReq.Realtime.Audio.MIMEType, "audio/") {
 							err := f.AudioCacheManager.CacheAudio(ctx, liveReq.Realtime.Audio, "input")
 							if err != nil {
-								fmt.Println("AudioCacheManager.CacheAudio input error", err)
+								// TODO: handle error
 							}
 						}
 
@@ -1228,13 +1228,13 @@ func (f *Flow) handleControlEventFlush(ctx agent.InvocationContext, llmResponse 
 	if llmResponse.Interrupted {
 		events, err := f.AudioCacheManager.FlushCaches(ctx, false, true)
 		if err != nil {
-			fmt.Println("failed to flush audio caches")
+			// TODO: handle error
 		}
 		return events
 	} else if llmResponse.TurnComplete {
 		events, err := f.AudioCacheManager.FlushCaches(ctx, true, true)
 		if err != nil {
-			fmt.Println("failed to flush audio caches")
+			// TODO: handle error
 		}
 		return events
 	}
