@@ -389,21 +389,32 @@ type MockInvocationContext struct {
 	invocationID string
 }
 
-func (m *MockInvocationContext) Session() session.Session                                { return m.session }
-func (m *MockInvocationContext) InvocationID() string                                    { return m.invocationID }
-func (m *MockInvocationContext) Agent() agent.Agent                                      { return nil }
-func (m *MockInvocationContext) Artifacts() agent.Artifacts                              { return nil }
-func (m *MockInvocationContext) Memory() agent.Memory                                    { return nil }
-func (m *MockInvocationContext) Branch() string                                          { return "" }
-func (m *MockInvocationContext) UserContent() *genai.Content                             { return nil }
-func (m *MockInvocationContext) RunConfig() *agent.RunConfig                             { return nil } // Use context? No, RunConfig struct.
-func (m *MockInvocationContext) EndInvocation()                                          {}
-func (m *MockInvocationContext) Ended() bool                                             { return false }
-func (m *MockInvocationContext) WithContext(ctx context.Context) agent.InvocationContext { return m }
-func (m *MockInvocationContext) Value(key any) any                                       { return nil }
-func (m *MockInvocationContext) Deadline() (deadline time.Time, ok bool)                 { return time.Time{}, false }
-func (m *MockInvocationContext) Done() <-chan struct{}                                   { return nil }
-func (m *MockInvocationContext) Err() error                                              { return nil }
+func (m *MockInvocationContext) Session() session.Session                                 { return m.session }
+func (m *MockInvocationContext) InvocationID() string                                     { return m.invocationID }
+func (m *MockInvocationContext) Agent() agent.Agent                                       { return nil }
+func (m *MockInvocationContext) Artifacts() agent.Artifacts                               { return nil }
+func (m *MockInvocationContext) Memory() agent.Memory                                     { return nil }
+func (m *MockInvocationContext) Branch() string                                           { return "" }
+func (m *MockInvocationContext) UserContent() *genai.Content                              { return nil }
+func (m *MockInvocationContext) RunConfig() *agent.RunConfig                              { return nil } // Use context? No, RunConfig struct.
+func (m *MockInvocationContext) EndInvocation()                                           {}
+func (m *MockInvocationContext) Ended() bool                                              { return false }
+func (m *MockInvocationContext) WithContext(ctx context.Context) agent.InvocationContext  { return m }
+func (m *MockInvocationContext) Value(key any) any                                        { return nil }
+func (m *MockInvocationContext) Deadline() (deadline time.Time, ok bool)                  { return time.Time{}, false }
+func (m *MockInvocationContext) Done() <-chan struct{}                                    { return nil }
+func (m *MockInvocationContext) Err() error                                               { return nil }
+func (m *MockInvocationContext) AppendInputRealtimeCache(entry agent.RealtimeCacheEntry)  {}
+func (m *MockInvocationContext) AppendOutputRealtimeCache(entry agent.RealtimeCacheEntry) {}
+func (m *MockInvocationContext) ClearInputRealtimeCache()                                 {}
+func (m *MockInvocationContext) ClearOutputRealtimeCache()                                {}
+func (m *MockInvocationContext) SetLiveSessionResumptionHandle(handle string)             {}
+func (m *MockInvocationContext) LiveSessionResumptionHandle() string                      { return "" }
+func (m *MockInvocationContext) InputRealtimeCache() []agent.RealtimeCacheEntry           { return nil }
+func (m *MockInvocationContext) OutputRealtimeCache() []agent.RealtimeCacheEntry          { return nil }
+func (m *MockInvocationContext) ResumabilityConfig() *agent.ResumabilityConfig            { return nil }
+func (m *MockInvocationContext) LiveRequestQueue() *agent.LiveRequestQueue                { return nil }
+func (m *MockInvocationContext) TranscriptionCache() []agent.TranscriptionEntry           { return nil }
 
 // MockCallbackContext
 type MockCallbackContext struct {
