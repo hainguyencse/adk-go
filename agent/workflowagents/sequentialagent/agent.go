@@ -71,6 +71,7 @@ func New(cfg Config) (agent.Agent, error) {
 
 	sequentialAgentImpl := &sequentialAgent{}
 	cfg.AgentConfig.Run = sequentialAgentImpl.Run
+	cfg.AgentConfig.RunLive = sequentialAgentImpl.RunLive
 
 	sequentialAgent, err := agent.New(cfg.AgentConfig)
 	if err != nil {
