@@ -95,7 +95,13 @@ func newSearchLocationTool() (tool.Tool, error) {
 				ClientType:   input.ClientType,
 			}
 
-			ctx.State().Set("search_result", result)
+			ctx.State().Set("search_result", map[string]any{
+				"propertyType": result.PropertyType,
+				"locationType": result.LocationType,
+				"locationIDs":  result.LocationIDs,
+				"radius":       result.Radius,
+				"clientType":   result.ClientType,
+			})
 
 			return result, nil
 		},
@@ -157,7 +163,17 @@ func newAnalyticsLocationTool() (tool.Tool, error) {
 				SuggestionProjectIDs: "100,200,300",
 			}
 
-			ctx.State().Set("analytics_result", result)
+			ctx.State().Set("analytics_result", map[string]any{
+				"propertyType":         result.PropertyType,
+				"locationType":         result.LocationType,
+				"locationIDs":          result.LocationIDs,
+				"radius":               result.Radius,
+				"clientType":           result.ClientType,
+				"userGoal":             result.UserGoal,
+				"sortBy":               result.SortBy,
+				"sortOrder":            result.SortOrder,
+				"suggestionProjectIds": result.SuggestionProjectIDs,
+			})
 
 			return result, nil
 		},

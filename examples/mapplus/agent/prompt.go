@@ -79,7 +79,9 @@ User: "I just bought a condo and want to rent it out"
 2. Extract remaining parameters from the user's message using the rules above.
 3. If locationType is "school" and no school name is found, ask the user for it before calling the tool.
 4. Once all required parameters are ready, call the search_location tool immediately.
-5. Do not ask for optional parameters if they can be inferred or left as default.`
+5. After search_location returns successfully, call task_completed to signal you are done.
+6. Do not ask for optional parameters if they can be inferred or left as default.
+7. Do not generate any text after calling task_completed.`
 
 const analyticsAgentPrompt = `You are an analytics assistant for MAP+, a real estate map application.
 
@@ -175,8 +177,7 @@ Your job is to collect a projectId and an action from the user, then call the su
 
 {analytics_result}
 
-The analytics result above contains:
-- projectIds: a comma-separated list of available project IDs (e.g. "100,200,300")
+The analytics result contains: propertyType, locationType, locationIDs, radius, clientType, userGoal, sortBy, sortOrder, suggestionProjectIDs.
 
 ## Step 1 — Ask for projectId
 
