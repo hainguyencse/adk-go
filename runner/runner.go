@@ -327,7 +327,6 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequ
 		}
 
 		agentToRun, err := r.findAgentToRunFromLastEvent(storedSession, r.rootAgent)
-		fmt.Println("agentToRun: ", agentToRun.Name())
 		if err != nil {
 			yield(nil, err)
 			return

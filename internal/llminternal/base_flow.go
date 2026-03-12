@@ -265,14 +265,11 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 								if err := f.AudioCacheManager.CacheAudio(ctx, audioBlob, "output"); err != nil {
 									fmt.Println("Cached Audio Failed")
 								}
-
-								fmt.Println("Cached Audio Blob Length", len(audioBlob.Data))
 							}
 
 							liveCh <- liveResult{event: ev}
 
 							if ev != nil && ev.Actions.TransferToAgent != "" {
-								fmt.Println("RunLive.TransferToAgent", ev.Actions.TransferToAgent)
 								transferAgentCh <- ev.Actions.TransferToAgent
 								return
 							}
@@ -286,7 +283,6 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 
 					case err, ok := <-errs:
 						if !ok {
-							fmt.Println("error channel is closed. returning")
 							return
 						}
 						if err != nil {
@@ -299,7 +295,6 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 								return
 							}
 
-							fmt.Println("Run Live Receiver - err: ", err)
 							liveCh <- liveResult{err: err}
 							return
 						}
@@ -352,7 +347,6 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 					// it must start a fresh Gemini Live session.
 					ctx.SetLiveSessionResumptionHandle("")
 
-					fmt.Printf("Transfer to agent: %s\n", agentName)
 					nextAgent := f.agentToRun(ctx, agentName)
 					if nextAgent == nil {
 						yield(nil, fmt.Errorf("failed to find agent: %s", agentName))

@@ -51,7 +51,6 @@ func NewAudioCacheManager(config *AudioCacheConfig) *AudioCacheManager {
 // CacheAudio caches incoming user or outgoing model audio data.
 func (m *AudioCacheManager) CacheAudio(ctx agent.InvocationContext, audioBlob *genai.Blob, cacheType string) error {
 	var role string
-	var cacheSize int
 
 	switch cacheType {
 	case "input":
@@ -62,7 +61,6 @@ func (m *AudioCacheManager) CacheAudio(ctx agent.InvocationContext, audioBlob *g
 			Timestamp: time.Now(),
 		}
 		ctx.AppendInputRealtimeCache(entry)
-		cacheSize = len(ctx.InputRealtimeCache())
 	case "output":
 		role = "model"
 		entry := agent.RealtimeCacheEntry{
@@ -71,12 +69,9 @@ func (m *AudioCacheManager) CacheAudio(ctx agent.InvocationContext, audioBlob *g
 			Timestamp: time.Now(),
 		}
 		ctx.AppendOutputRealtimeCache(entry)
-		cacheSize = len(ctx.OutputRealtimeCache())
 	default:
 		return fmt.Errorf("cacheType must be either 'input' or 'output'")
 	}
-
-	fmt.Println("AudioCacheManager.CacheAudio.cacheSize %v", cacheSize)
 
 	return nil
 }

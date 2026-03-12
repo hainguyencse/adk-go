@@ -116,7 +116,6 @@ func (c *liveConnection) SendContent(content *genai.Content) error {
 
 func (c *liveConnection) SendRealtime(input *genai.LiveRealtimeInput) error {
 	if input == nil {
-		fmt.Println("SendRealtime: input is nil")
 		return nil
 	}
 

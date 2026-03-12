@@ -61,7 +61,7 @@ type searchLocationInput struct {
 	Radius       string `json:"radius,omitempty" description:"search radius"`
 
 	// Filter
-	PropertyType string `json:"propertyType,omitempty" description:"the property type"`
+	PropertyType string `json:"propertyType" description:"the property type"`
 
 	ClientType string `json:"clientType" description:"user client type. options: buyer/seller/landlord/tenant"`
 }
@@ -88,12 +88,14 @@ func newSearchLocationTool() (tool.Tool, error) {
 			}
 
 			result := searchLocationOutput{
+				PropertyType: input.PropertyType,
 				LocationType: input.LocationType,
 				LocationIDs:  input.Keyword,
 				Radius:       radius,
-				PropertyType: input.PropertyType,
 				ClientType:   input.ClientType,
 			}
+
+			ctx.State().Set("search_result", result)
 
 			return result, nil
 		},
@@ -154,6 +156,8 @@ func newAnalyticsLocationTool() (tool.Tool, error) {
 
 				SuggestionProjectIDs: "100,200,300",
 			}
+
+			ctx.State().Set("analytics_result", result)
 
 			return result, nil
 		},
