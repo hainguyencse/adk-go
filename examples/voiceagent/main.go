@@ -168,7 +168,7 @@ func (s *Server) upstreamTask(ctx context.Context, conn *websocket.Conn, queue *
 				MIMEType: "audio/pcm;rate=16000",
 				Data:     data,
 			}
-			queue.SendRealtime(genai.LiveRealtimeInput{
+			queue.SendRealtime(&genai.LiveRealtimeInput{
 				Media: blob,
 			})
 
