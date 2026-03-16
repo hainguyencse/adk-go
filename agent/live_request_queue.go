@@ -16,8 +16,8 @@ func NewLiveRequestQueue(buffer int) *LiveRequestQueue {
 	return &LiveRequestQueue{ch: make(chan LiveRequest, buffer)}
 }
 
-func (q *LiveRequestQueue) SendRealtime(in genai.LiveRealtimeInput) {
-	q.ch <- LiveRequest{Realtime: &in}
+func (q *LiveRequestQueue) SendRealtime(in *genai.LiveRealtimeInput) {
+	q.ch <- LiveRequest{Realtime: in}
 }
 
 func (q *LiveRequestQueue) SendContent(c *genai.Content) {
