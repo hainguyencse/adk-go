@@ -169,6 +169,7 @@ func NewRootAgent(ctx context.Context, llmModel adkmodel.LLM) (adkagent.Agent, e
 		return nil, fmt.Errorf("failed to create agent: %w", err)
 	}
 
+	thinkingBudget := int32(1000)
 	rootAgent, err := llmagent.New(adkagentllm.Config{
 		Name:        "root_agent",
 		Description: "Root Agent. Transfer to agent if user request search map, search project",
@@ -177,6 +178,20 @@ func NewRootAgent(ctx context.Context, llmModel adkmodel.LLM) (adkagent.Agent, e
 		Tools:       []tool.Tool{},
 		SubAgents: []adkagent.Agent{
 			mapPlusAgent,
+		},
+		LiveConnectConfig: &genai.LiveConnectConfig{
+			ThinkingConfig: &genai.ThinkingConfig{
+				ThinkingBudget:  &thinkingBudget,
+				IncludeThoughts: true,
+			},
+			SpeechConfig: &genai.SpeechConfig{
+				LanguageCode: "en-US",
+				VoiceConfig: &genai.VoiceConfig{
+					PrebuiltVoiceConfig: &genai.PrebuiltVoiceConfig{
+						VoiceName: "Aoede",
+					},
+				},
+			},
 		},
 	})
 
