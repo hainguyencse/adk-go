@@ -125,6 +125,18 @@ func (c *liveConnection) SendRealtime(input *genai.LiveRealtimeInput) error {
 		})
 	}
 
+	if input.Audio != nil {
+		return c.session.SendRealtimeInput(genai.LiveSendRealtimeInputParameters{
+			Audio: input.Audio,
+		})
+	}
+
+	if input.Video != nil {
+		return c.session.SendRealtimeInput(genai.LiveSendRealtimeInputParameters{
+			Video: input.Video,
+		})
+	}
+
 	if input.ActivityStart != nil {
 		return c.session.SendRealtimeInput(genai.LiveSendRealtimeInputParameters{
 			ActivityStart: input.ActivityStart,
