@@ -332,6 +332,12 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequ
 			return
 		}
 
+		ctx = parentmap.ToContext(ctx, r.parents)
+		ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
+			StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
+		})
+		ctx = plugininternal.ToContext(ctx, r.pluginManager)
+
 		invCtx := r.newInvocationContextForLive(ctx, userID, sessionID, liveRequestQueue, cfg, agentToRun, storedSession)
 
 		pluginManager := r.pluginManager
