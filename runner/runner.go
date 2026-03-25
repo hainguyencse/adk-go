@@ -335,6 +335,22 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequ
 		invCtx := r.newInvocationContextForLive(ctx, userID, sessionID, liveRequestQueue, cfg, agentToRun, storedSession)
 
 		pluginManager := r.pluginManager
+		if pluginManager != nil {
+			defer pluginManager.RunAfterRunCallback(invCtx)
+
+			earlyExitResult, err := pluginManager.RunBeforeRunCallback(invCtx)
+			if earlyExitResult != nil || err != nil {
+				earlyExitEvent := session.NewEvent(invCtx.InvocationID())
+				earlyExitEvent.Author = "user"
+				if err := r.sessionService.AppendEvent(ctx, storedSession, earlyExitEvent); err != nil {
+					yield(nil, fmt.Errorf("failed to add event to session: %w", err))
+					return
+				}
+				yield(earlyExitEvent, err)
+				return
+			}
+		}
+
 		for event, err := range agentToRun.RunLive(invCtx) {
 			if err != nil {
 				if !yield(event, err) {
