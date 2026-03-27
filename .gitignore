@@ -20,5 +20,5 @@ profile.cov
 # Go workspace file
 go.work
 go.work.sum
-
+eval_results/
 *.DS_Store
