@@ -12,15 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package api provides a sublauncher that adds ADK REST API to the web server (using url /api/)
+// Package api provides a sublauncher that adds ADK REST API capabilities.
 package api
 
 import (
 	"flag"
 	"fmt"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/gorilla/mux"
+
 	"google.golang.org/adk/cmd/launcher"
 	weblauncher "google.golang.org/adk/cmd/launcher/web"
 	"google.golang.org/adk/internal/cli/util"
@@ -30,6 +33,8 @@ import (
 // apiConfig contains parametres for lauching ADK REST API
 type apiConfig struct {
 	frontendAddress string
+	pathPrefix      string
+	sseWriteTimeout time.Duration
 }
 
 // apiLauncher can launch ADK REST API
@@ -61,22 +66,28 @@ func corsWithArgs(frontendAddress string) func(next http.Handler) http.Handler {
 
 // UserMessage implements web.Sublauncher. Prints message to the user
 func (a *apiLauncher) UserMessage(webURL string, printer func(v ...any)) {
-	printer(fmt.Sprintf("       api:  you can access API using %s/api", webURL))
-	printer(fmt.Sprintf("       api:      for instance: %s/api/list-apps", webURL))
+	printer(fmt.Sprintf("       api:  you can access API using %s%s", webURL, a.config.pathPrefix))
+	printer(fmt.Sprintf("       api:      for instance: %s%s/list-apps", webURL, a.config.pathPrefix))
 }
 
 // SetupSubrouters adds the API router to the parent router.
 func (a *apiLauncher) SetupSubrouters(router *mux.Router, config *launcher.Config) error {
 	// Create the ADK REST API handler
-	apiHandler := adkrest.NewHandler(config)
+	apiHandler := adkrest.NewHandler(config, a.config.sseWriteTimeout)
 
 	// Wrap it with CORS middleware
 	corsHandler := corsWithArgs(a.config.frontendAddress)(apiHandler)
 
-	// Register it at the /api/ path
-	router.Methods("GET", "POST", "DELETE", "OPTIONS").PathPrefix("/api/").Handler(
-		http.StripPrefix("/api", corsHandler),
-	)
+	// If prefix is empty, don't use PathPrefix("") because it's too greedy.
+	// Instead, attach the handler to the main router directly.
+	if a.config.pathPrefix == "" || a.config.pathPrefix == "/" {
+		// This allows other routes (like /ui/) to match first if registered
+		router.Methods("GET", "POST", "DELETE", "OPTIONS").Handler(corsHandler)
+	} else {
+		router.Methods("GET", "POST", "DELETE", "OPTIONS").
+			PathPrefix(a.config.pathPrefix).
+			Handler(http.StripPrefix(a.config.pathPrefix, corsHandler))
+	}
 	return nil
 }
 
@@ -91,6 +102,12 @@ func (a *apiLauncher) Parse(args []string) ([]string, error) {
 	if err != nil || !a.flags.Parsed() {
 		return nil, fmt.Errorf("failed to parse api flags: %v", err)
 	}
+	p := a.config.pathPrefix
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	a.config.pathPrefix = strings.TrimSuffix(p, "/")
+
 	restArgs := a.flags.Args()
 	return restArgs, nil
 }
@@ -106,6 +123,8 @@ func NewLauncher() weblauncher.Sublauncher {
 
 	fs := flag.NewFlagSet("web", flag.ContinueOnError)
 	fs.StringVar(&config.frontendAddress, "webui_address", "localhost:8080", "ADK WebUI address as seen from the user browser. It's used to allow CORS requests. Please specify only hostname and (optionally) port.")
+	fs.StringVar(&config.pathPrefix, "path_prefix", "/api", "ADK REST API path prefix. Default is '/api'.")
+	fs.DurationVar(&config.sseWriteTimeout, "sse-write-timeout", 120*time.Second, "SSE server write timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for writing the SSE response after reading the headers & body")
 
 	return &apiLauncher{
 		config: config,

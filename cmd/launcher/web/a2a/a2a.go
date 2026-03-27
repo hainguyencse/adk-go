@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package a2a provides a sublauncher that adds A2A capabilities to the web server
+// Package a2a provides a sublauncher that provides A2A capabilities.
 package a2a
 
 import (
@@ -23,6 +23,7 @@ import (
 	a2acore "github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2asrv"
 	"github.com/gorilla/mux"
+
 	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/web"
 	"google.golang.org/adk/internal/cli/util"
@@ -104,6 +105,7 @@ func (a *a2aLauncher) SetupSubrouters(router *mux.Router, config *launcher.Confi
 			Agent:           agent,
 			SessionService:  config.SessionService,
 			ArtifactService: config.ArtifactService,
+			PluginConfig:    config.PluginConfig,
 		},
 	})
 	reqHandler := a2asrv.NewHandler(executor, config.A2AOptions...)

@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MAP+ Debug</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 20px;
+      background: #1a1d2e;
+      border-bottom: 1px solid #2d3748;
+    }
+
+    header h1 { font-size: 1rem; font-weight: 600; color: #63b3ed; }
+
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.8rem;
+      color: #718096;
+    }
+
+    .dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: #4a5568;
+    }
+    .dot.on { background: #48bb78; box-shadow: 0 0 6px #48bb78; }
+    .dot.err { background: #fc8181; }
+
+    .connect-bar {
+      display: flex;
+      gap: 8px;
+      padding: 10px 20px;
+      background: #1a1d2e;
+      border-bottom: 1px solid #2d3748;
+      flex-wrap: wrap;
+    }
+
+    .connect-bar input {
+      flex: 1;
+      min-width: 120px;
+      padding: 6px 10px;
+      background: #0f1117;
+      border: 1px solid #2d3748;
+      border-radius: 6px;
+      color: #e2e8f0;
+      font-size: 0.82rem;
+      font-family: monospace;
+      outline: none;
+    }
+
+    .connect-bar input:focus { border-color: #63b3ed; }
+
+    button {
+      padding: 6px 16px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      font-weight: 500;
+      transition: opacity 0.15s;
+    }
+    button:hover { opacity: 0.85; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    #connectBtn { background: #48bb78; color: #0f1117; }
+    #connectBtn.off { background: #fc8181; }
+
+    /* Chat */
+    #chat {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    #chat::-webkit-scrollbar { width: 5px; }
+    #chat::-webkit-scrollbar-thumb { background: #2d3748; border-radius: 3px; }
+
+    .msg {
+      max-width: 80%;
+      padding: 10px 14px;
+      border-radius: 10px;
+      font-size: 0.9rem;
+      line-height: 1.5;
+      animation: fadeUp 0.2s ease;
+    }
+
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(6px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .msg.user {
+      align-self: flex-end;
+      background: #2b6cb0;
+      color: #ebf8ff;
+    }
+
+    .msg.system {
+      align-self: center;
+      background: transparent;
+      color: #4a5568;
+      font-size: 0.78rem;
+      padding: 4px 0;
+    }
+
+    .msg.error {
+      align-self: center;
+      background: rgba(252, 129, 129, 0.15);
+      border: 1px solid rgba(252, 129, 129, 0.3);
+      color: #fc8181;
+      font-size: 0.82rem;
+    }
+
+    /* Tool response card */
+    .tool-card {
+      align-self: flex-start;
+      max-width: 90%;
+      background: #1a1d2e;
+      border: 1px solid #2d3748;
+      border-radius: 10px;
+      overflow: hidden;
+      animation: fadeUp 0.2s ease;
+    }
+
+    .tool-card-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      background: #243044;
+      font-size: 0.75rem;
+      font-family: monospace;
+    }
+
+    .tool-card-header .agent {
+      color: #68d391;
+      font-weight: 600;
+    }
+
+    .tool-card-header .tool-name {
+      color: #fbd38d;
+    }
+
+    .tool-card pre {
+      padding: 10px 12px;
+      font-size: 0.78rem;
+      font-family: 'Cascadia Code', 'Fira Code', monospace;
+      line-height: 1.4;
+      color: #a0aec0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      margin: 0;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+
+    /* Controls */
+    .controls {
+      display: flex;
+      gap: 8px;
+      padding: 12px 20px;
+      background: #1a1d2e;
+      border-top: 1px solid #2d3748;
+    }
+
+    #textInput {
+      flex: 1;
+      padding: 10px 14px;
+      background: #0f1117;
+      border: 1px solid #2d3748;
+      border-radius: 8px;
+      color: #e2e8f0;
+      font-size: 0.9rem;
+      outline: none;
+    }
+    #textInput:focus { border-color: #63b3ed; }
+    #textInput::placeholder { color: #4a5568; }
+
+    #sendBtn { background: #63b3ed; color: #0f1117; }
+    #micBtn  { background: #2d3748; color: #e2e8f0; min-width: 44px; }
+    #micBtn.rec { background: #fc8181; color: #0f1117; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>MAP+ Debug</h1>
+  <div class="status">
+    <div class="dot" id="dot"></div>
+    <span id="statusTxt">Disconnected</span>
+  </div>
+</header>
+
+<div class="connect-bar">
+  <input id="wsUrl"     value="ws://localhost:8080" placeholder="WS URL" />
+  <input id="userId"    value="user1"               placeholder="User ID" />
+  <input id="sessionId" placeholder="Session ID" />
+  <button id="connectBtn" onclick="toggleConn()">Connect</button>
+</div>
+
+<div id="chat"></div>
+
+<div class="controls">
+  <button id="micBtn" onclick="toggleMic()" disabled>🎤</button>
+  <input id="textInput" placeholder="Type a message..." onkeydown="onKey(event)" disabled />
+  <button id="sendBtn"  onclick="sendText()" disabled>Send</button>
+</div>
+
+<script>
+// ── State ────────────────────────────────────────────────────────
+let ws = null, connected = false, recording = false;
+let audioCtx = null, mediaStream = null;
+let playCtx = null, nextPlayTime = 0, playing = false;
+const playQueue = [];
+
+// ── DOM ──────────────────────────────────────────────────────────
+const dot       = document.getElementById('dot');
+const statusTxt = document.getElementById('statusTxt');
+const connectBtn= document.getElementById('connectBtn');
+const chat      = document.getElementById('chat');
+const micBtn    = document.getElementById('micBtn');
+const textInput = document.getElementById('textInput');
+const sendBtn   = document.getElementById('sendBtn');
+
+// ── Connection ────────────────────────────────────────────────────
+function toggleConn() { connected ? disconnect() : connect(); }
+
+function connect() {
+  const url = `${document.getElementById('wsUrl').value}/ws/${document.getElementById('userId').value}/${document.getElementById('sessionId').value}`;
+  ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    connected = true;
+    setUI(true);
+    log('system', 'Connected');
+  };
+  ws.onclose = () => {
+    connected = false;
+    setUI(false);
+    stopMic();
+    log('system', 'Disconnected');
+  };
+  ws.onerror = () => log('error', 'Connection error. Is the server running?');
+  ws.onmessage = onMessage;
+}
+
+function disconnect() { ws && ws.close(); ws = null; }
+
+function setUI(on) {
+  dot.className      = 'dot' + (on ? ' on' : '');
+  statusTxt.textContent = on ? 'Connected' : 'Disconnected';
+  connectBtn.textContent = on ? 'Disconnect' : 'Connect';
+  connectBtn.className = 'btn' + (on ? ' off' : '');
+  micBtn.disabled = textInput.disabled = sendBtn.disabled = !on;
+}
+
+// ── Messages ─────────────────────────────────────────────────────
+function onMessage(ev) {
+  if (ev.data instanceof ArrayBuffer) {
+    playPCM(ev.data);
+    return;
+  }
+  try {
+    const d = JSON.parse(ev.data);
+    if (d.error)    { log('error', d.error); return; }
+    if (d.toolName) { showTool(d.author, d.toolName, d.toolResponse); return; }
+    if (d.text)     { log('agent', d.text); }
+    // turnComplete / interrupted: no UI needed
+  } catch { log('agent', ev.data); }
+}
+
+// ── Text ─────────────────────────────────────────────────────────
+function sendText() {
+  const t = textInput.value.trim();
+  if (!t || !connected) return;
+  ws.send(t);
+  log('user', t);
+  textInput.value = '';
+}
+
+function onKey(e) { if (e.key === 'Enter') sendText(); }
+
+// ── Microphone (16kHz PCM16) ─────────────────────────────────────
+async function toggleMic() { recording ? stopMic() : await startMic(); }
+
+async function startMic() {
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true }
+    });
+    audioCtx = new AudioContext({ sampleRate: 16000 });
+    const src = audioCtx.createMediaStreamSource(mediaStream);
+    const proc = audioCtx.createScriptProcessor(4096, 1, 1);
+    proc.onaudioprocess = e => {
+      if (!recording || !connected) return;
+      const pcm = toInt16(e.inputBuffer.getChannelData(0));
+      ws && ws.readyState === WebSocket.OPEN && ws.send(pcm.buffer);
+    };
+    src.connect(proc);
+    proc.connect(audioCtx.destination);
+    recording = true;
+    micBtn.textContent = '⏹';
+    micBtn.className = 'rec';
+    log('system', '🎤 Recording…');
+  } catch (err) {
+    log('error', 'Microphone error: ' + err.message);
+  }
+}
+
+function stopMic() {
+  recording = false;
+  micBtn.textContent = '🎤';
+  micBtn.className = '';
+  audioCtx && audioCtx.close(); audioCtx = null;
+  mediaStream && mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null;
+}
+
+function toInt16(f32) {
+  const i16 = new Int16Array(f32.length);
+  for (let i = 0; i < f32.length; i++) {
+    const s = Math.max(-1, Math.min(1, f32[i]));
+    i16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+  }
+  return i16;
+}
+
+// ── Playback (24kHz PCM16) ────────────────────────────────────────
+function playPCM(buf) {
+  playQueue.push(buf);
+  if (!playing) drainQueue();
+}
+
+async function drainQueue() {
+  if (!playQueue.length) { playing = false; nextPlayTime = 0; return; }
+  playing = true;
+  if (!playCtx) playCtx = new AudioContext({ sampleRate: 24000 });
+  if (playCtx.state === 'suspended') await playCtx.resume();
+
+  while (playQueue.length) {
+    const buf  = playQueue.shift();
+    const i16  = new Int16Array(buf);
+    const f32  = new Float32Array(i16.length);
+    for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / (i16[i] < 0 ? 0x8000 : 0x7FFF);
+
+    const ab = playCtx.createBuffer(1, f32.length, 24000);
+    ab.getChannelData(0).set(f32);
+    const src = playCtx.createBufferSource();
+    src.buffer = ab;
+    src.connect(playCtx.destination);
+
+    const now = playCtx.currentTime;
+    if (nextPlayTime < now) nextPlayTime = now + 0.05;
+    src.start(nextPlayTime);
+    nextPlayTime += ab.duration;
+
+    if (!playQueue.length) src.onended = () => {
+      if (playQueue.length) drainQueue(); else { playing = false; nextPlayTime = 0; }
+    };
+  }
+}
+
+// ── UI helpers ────────────────────────────────────────────────────
+function log(type, text) {
+  const el = document.createElement('div');
+  el.className = 'msg ' + type;
+  el.textContent = text;
+  chat.appendChild(el);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+function showTool(author, toolName, response) {
+  const card = document.createElement('div');
+  card.className = 'tool-card';
+  card.innerHTML = `
+    <div class="tool-card-header">
+      <span class="agent">${esc(author)}</span>
+      <span>›</span>
+      <span class="tool-name">${esc(toolName)}</span>
+    </div>
+    <pre>${esc(JSON.stringify(response, null, 2))}</pre>
+  `;
+  chat.appendChild(card);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── Init ──────────────────────────────────────────────────────────
+document.getElementById('sessionId').value = 'session_' + Math.random().toString(36).slice(2, 9);
+</script>
+</body>
+</html>

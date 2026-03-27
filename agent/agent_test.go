@@ -15,14 +15,16 @@
 package agent
 
 import (
+	"context"
 	"iter"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 func TestAgentCallbacks(t *testing.T) {
@@ -47,6 +49,10 @@ func TestAgentCallbacks(t *testing.T) {
 					Author: "test",
 					LLMResponse: model.LLMResponse{
 						Content: genai.NewContentFromText("hello from before_agent_callback", genai.RoleModel),
+					},
+					Actions: session.EventActions{
+						StateDelta:    map[string]any{},
+						ArtifactDelta: map[string]int64{},
 					},
 				},
 			},
@@ -93,13 +99,16 @@ func TestAgentCallbacks(t *testing.T) {
 					LLMResponse: model.LLMResponse{
 						Content: genai.NewContentFromText("hello from after_agent_callback", genai.RoleModel),
 					},
+					Actions: session.EventActions{
+						StateDelta:    map[string]any{},
+						ArtifactDelta: map[string]int64{},
+					},
 				},
 			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-
 			custom := &customAgent{}
 
 			testAgent, err := New(Config{
@@ -113,7 +122,9 @@ func TestAgentCallbacks(t *testing.T) {
 			}
 
 			ctx := &invocationContext{
-				agent: testAgent,
+				Context: t.Context(),
+				agent:   testAgent,
+				session: &mockSession{sessionID: "test-session"},
 			}
 			var gotEvents []*session.Event
 			for event, err := range testAgent.Run(ctx) {
@@ -133,8 +144,7 @@ func TestAgentCallbacks(t *testing.T) {
 			}
 
 			for i, gotEvent := range gotEvents {
-				if diff := cmp.Diff(tt.wantEvents[i], gotEvent, cmpopts.IgnoreFields(session.Event{}, "ID", "Timestamp", "InvocationID"),
-					cmpopts.IgnoreFields(session.EventActions{}, "StateDelta")); diff != "" {
+				if diff := cmp.Diff(tt.wantEvents[i], gotEvent, cmpopts.IgnoreFields(session.Event{}, "ID", "Timestamp", "InvocationID")); diff != "" {
 					t.Errorf("diff in the events: got event[%d]: %v, want: %v, diff: %v", i, gotEvent, tt.wantEvents[i], diff)
 				}
 			}
@@ -159,8 +169,10 @@ func TestEndInvocation_EndsBeforeMainCall(t *testing.T) {
 	}
 
 	ctx := &invocationContext{
+		Context:       t.Context(),
 		agent:         testAgent,
 		endInvocation: true,
+		session:       &mockSession{sessionID: "test-session"},
 	}
 	for _, err := range testAgent.Run(ctx) {
 		if err != nil {
@@ -192,7 +204,9 @@ func TestEndInvocation_EndsAfterMainCall(t *testing.T) {
 	}
 
 	ctx := &invocationContext{
-		agent: testAgent,
+		Context: t.Context(),
+		agent:   testAgent,
+		session: &mockSession{sessionID: "test-session"},
 	}
 	var gotEvents []*session.Event
 	for event, err := range testAgent.Run(ctx) {
@@ -242,3 +256,32 @@ func (a *customAgent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error
 		}, nil)
 	}
 }
+
+type testKey struct{}
+
+func TestWithContext(t *testing.T) {
+	baseCtx := t.Context()
+	inv := &invocationContext{
+		Context:      baseCtx,
+		invocationID: "test",
+		branch:       "branch",
+	}
+
+	key := testKey{}
+	val := "val"
+	got := inv.WithContext(context.WithValue(baseCtx, key, val))
+
+	if got.Value(key) != val {
+		t.Errorf("WithContext() did not update context")
+	}
+	if diff := cmp.Diff(inv, got, cmp.AllowUnexported(invocationContext{}), cmpopts.IgnoreFields(invocationContext{}, "Context")); diff != "" {
+		t.Errorf("WithContext() params mismatch (-want +got):\n%s", diff)
+	}
+}
+
+type mockSession struct {
+	session.Session
+	sessionID string
+}
+
+func (m *mockSession) ID() string { return m.sessionID }

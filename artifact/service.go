@@ -56,7 +56,7 @@ type SaveRequest struct {
 	// Part is the artifact to store.
 	Part *genai.Part
 
-	// Belows are optional fields.
+	// Below are optional fields.
 
 	// If set, the artifact will be saved with this version.
 	// If unset, a new version will be created.
@@ -75,7 +75,7 @@ func validateRequiredStrings(fields []requiredField) []string {
 	return missingFields
 }
 
-// Validate checks if the struct is valid or if its missing field
+// Validate checks if the struct is valid or if it is missing fields.
 func (req *SaveRequest) Validate() error {
 	// Define the fields to check in the desired order
 	fieldsToCheck := []requiredField{
@@ -99,7 +99,19 @@ func (req *SaveRequest) Validate() error {
 	}
 
 	if req.Part.Text == "" && req.Part.InlineData == nil {
-		return fmt.Errorf("invalid save request: Part.InlineData or Part.Text have to be set")
+		return fmt.Errorf("invalid save request: Part.InlineData or Part.Text has to be set")
+	}
+
+	// Validate that FileName doesn't contain path separators
+	if err := validateFileName(req.FileName); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateFileName(name string) error {
+	if strings.Contains(name, "/") || strings.Contains(name, "\\") {
+		return fmt.Errorf("invalid name: filename cannot contain path separators")
 	}
 	return nil
 }
@@ -113,11 +125,11 @@ type SaveResponse struct {
 type LoadRequest struct {
 	AppName, UserID, SessionID, FileName string
 
-	// Belows are optional fields.
+	// Below are optional fields.
 	Version int64
 }
 
-// Validate checks if the struct is valid or if its missing field
+// Validate checks if the struct is valid or if it is missing fields.
 func (req *LoadRequest) Validate() error {
 	// Define the fields to check in the desired order
 	fieldsToCheck := []requiredField{
@@ -134,6 +146,12 @@ func (req *LoadRequest) Validate() error {
 	if len(missingFields) > 0 {
 		return fmt.Errorf("invalid load request: missing required fields: %s", strings.Join(missingFields, ", "))
 	}
+
+	// Validate that FileName doesn't contain path separators
+	if err := validateFileName(req.FileName); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -147,11 +165,11 @@ type LoadResponse struct {
 type DeleteRequest struct {
 	AppName, UserID, SessionID, FileName string
 
-	// Belows are optional fields.
+	// Below are optional fields.
 	Version int64
 }
 
-// Validate checks if the struct is valid or if its missing field
+// Validate checks if the struct is valid or if it is missing fields.
 func (req *DeleteRequest) Validate() error {
 	// Define the fields to check in the desired order
 	fieldsToCheck := []requiredField{
@@ -168,6 +186,12 @@ func (req *DeleteRequest) Validate() error {
 	if len(missingFields) > 0 {
 		return fmt.Errorf("invalid delete request: missing required fields: %s", strings.Join(missingFields, ", "))
 	}
+
+	// Validate that FileName doesn't contain path separators
+	if err := validateFileName(req.FileName); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -176,7 +200,7 @@ type ListRequest struct {
 	AppName, UserID, SessionID string
 }
 
-// Validate checks if the struct is valid or if its missing field
+// Validate checks if the struct is valid or if it is missing a field.
 func (req *ListRequest) Validate() error {
 	// Define the fields to check in the desired order
 	fieldsToCheck := []requiredField{
@@ -222,6 +246,12 @@ func (req *VersionsRequest) Validate() error {
 	if len(missingFields) > 0 {
 		return fmt.Errorf("invalid versions request: missing required fields: %s", strings.Join(missingFields, ", "))
 	}
+
+	// Validate that FileName doesn't contain path separators
+	if err := validateFileName(req.FileName); err != nil {
+		return err
+	}
+
 	return nil
 }
 

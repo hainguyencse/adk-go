@@ -17,6 +17,7 @@ package database
 import (
 	"fmt"
 	"iter"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -75,13 +76,12 @@ func (s *localSession) appendEvent(event *session.Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	processedEvent := trimTempDeltaState(event)
-	if err := updateSessionState(s, processedEvent); err != nil {
+	if err := updateSessionState(s, event); err != nil {
 		return fmt.Errorf("failed to update localSession state: %w", err)
 	}
 
-	s.events = append(s.events, event)
-	s.updatedAt = event.Timestamp
+	processedEvent := trimTempDeltaState(event)
+	s.events = append(s.events, processedEvent)
 	return nil
 }
 
@@ -126,18 +126,17 @@ func (s *state) Get(key string) (any, error) {
 }
 
 func (s *state) All() iter.Seq2[string, any] {
-	return func(yield func(key string, val any) bool) {
-		s.mu.RLock()
+	s.mu.RLock()
+	// Create a copy of the state to iterate over it without holding the lock.
+	stateCopy := maps.Clone(s.state)
+	s.mu.RUnlock()
 
-		for k, v := range s.state {
-			s.mu.RUnlock()
+	return func(yield func(key string, val any) bool) {
+		for k, v := range stateCopy {
 			if !yield(k, v) {
 				return
 			}
-			s.mu.RLock()
 		}
-
-		s.mu.RUnlock()
 	}
 }
 
@@ -180,16 +179,13 @@ func updateSessionState(sess *localSession, event *session.Event) error {
 		sess.state = make(map[string]any)
 	}
 
-	for key, value := range event.Actions.StateDelta {
-		if strings.HasPrefix(key, session.KeyPrefixTemp) {
-			continue
-		}
-		sess.state[key] = value
-	}
+	maps.Copy(sess.state, event.Actions.StateDelta)
 
 	return nil
 }
 
-var _ session.Session = (*localSession)(nil)
-var _ session.Events = (*events)(nil)
-var _ session.State = (*state)(nil)
+var (
+	_ session.Session = (*localSession)(nil)
+	_ session.Events  = (*events)(nil)
+	_ session.State   = (*state)(nil)
+)

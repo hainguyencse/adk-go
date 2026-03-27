@@ -22,13 +22,14 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 func TestNewSequentialAgent(t *testing.T) {
@@ -63,6 +64,10 @@ func TestNewSequentialAgent(t *testing.T) {
 							Role: genai.RoleModel,
 						},
 					},
+					Actions: session.EventActions{
+						StateDelta:    map[string]any{},
+						ArtifactDelta: map[string]int64{},
+					},
 				},
 				{
 					Author: "custom_agent_1",
@@ -73,6 +78,10 @@ func TestNewSequentialAgent(t *testing.T) {
 							},
 							Role: genai.RoleModel,
 						},
+					},
+					Actions: session.EventActions{
+						StateDelta:    map[string]any{},
+						ArtifactDelta: map[string]int64{},
 					},
 				},
 			},
@@ -94,6 +103,10 @@ func TestNewSequentialAgent(t *testing.T) {
 							Role: genai.RoleModel,
 						},
 					},
+					Actions: session.EventActions{
+						StateDelta:    map[string]any{},
+						ArtifactDelta: map[string]int64{},
+					},
 				},
 				{
 					Author: "custom_agent_1",
@@ -104,6 +117,10 @@ func TestNewSequentialAgent(t *testing.T) {
 							},
 							Role: genai.RoleModel,
 						},
+					},
+					Actions: session.EventActions{
+						StateDelta:    map[string]any{},
+						ArtifactDelta: map[string]int64{},
 					},
 				},
 				{
@@ -116,6 +133,10 @@ func TestNewSequentialAgent(t *testing.T) {
 							Role: genai.RoleModel,
 						},
 					},
+					Actions: session.EventActions{
+						StateDelta:    map[string]any{},
+						ArtifactDelta: map[string]int64{},
+					},
 				},
 				{
 					Author: "custom_agent_3",
@@ -126,6 +147,10 @@ func TestNewSequentialAgent(t *testing.T) {
 							},
 							Role: genai.RoleModel,
 						},
+					},
+					Actions: session.EventActions{
+						StateDelta:    map[string]any{},
+						ArtifactDelta: map[string]int64{},
 					},
 				},
 			},
@@ -144,7 +169,8 @@ func TestNewSequentialAgent(t *testing.T) {
 			args: args{
 				maxIterations: 0,
 				subAgents: []agent.Agent{newCustomAgent(t, 0), newSequentialAgent(t, []agent.Agent{
-					newSequentialAgent(t, []agent.Agent{newCustomAgent(t, 1), newCustomAgent(t, 2)}, "test_agent1")}, "test_agent"), newCustomAgent(t, 3)},
+					newSequentialAgent(t, []agent.Agent{newCustomAgent(t, 1), newCustomAgent(t, 2)}, "test_agent1"),
+				}, "test_agent"), newCustomAgent(t, 3)},
 			},
 			wantErr:        true,
 			wantErrMessage: `failed to create agent tree: agent names must be unique in the agent tree, found duplicate: "test_agent"`,
@@ -154,7 +180,8 @@ func TestNewSequentialAgent(t *testing.T) {
 			args: args{
 				maxIterations: 0,
 				subAgents: []agent.Agent{newCustomAgent(t, 0), newSequentialAgent(t, []agent.Agent{
-					newSequentialAgent(t, []agent.Agent{newCustomAgent(t, 1), newCustomAgent(t, 2)}, "test_agent1")}, "test_agent1"), newCustomAgent(t, 3)},
+					newSequentialAgent(t, []agent.Agent{newCustomAgent(t, 1), newCustomAgent(t, 2)}, "test_agent1"),
+				}, "test_agent1"), newCustomAgent(t, 3)},
 			},
 			wantErr:        true,
 			wantErrMessage: `failed to create agent tree: agent names must be unique in the agent tree, found duplicate: "test_agent1"`,
@@ -172,8 +199,10 @@ func TestNewSequentialAgent(t *testing.T) {
 			name: "err with repeated inner sequential in two levels",
 			args: args{
 				maxIterations: 0,
-				subAgents: []agent.Agent{newCustomAgent(t, 0), newSequentialAgent(t, []agent.Agent{sameAgent}, "test_agent1"),
-					sameAgent, newCustomAgent(t, 3)},
+				subAgents: []agent.Agent{
+					newCustomAgent(t, 0), newSequentialAgent(t, []agent.Agent{sameAgent}, "test_agent1"),
+					sameAgent, newCustomAgent(t, 3),
+				},
 			},
 			wantErr:        true,
 			wantErrMessage: `failed to create agent tree: "same_agent" agent cannot have >1 parents, found: "test_agent1", "test_agent"`,
@@ -248,8 +277,7 @@ func TestNewSequentialAgent(t *testing.T) {
 
 				for i, gotEvent := range gotEvents {
 					tt.wantEvents[i].Timestamp = gotEvent.Timestamp
-					if diff := cmp.Diff(tt.wantEvents[i], gotEvent, cmpopts.IgnoreFields(session.Event{}, "ID", "Timestamp", "InvocationID"),
-						cmpopts.IgnoreFields(session.EventActions{}, "StateDelta")); diff != "" {
+					if diff := cmp.Diff(tt.wantEvents[i], gotEvent, cmpopts.IgnoreFields(session.Event{}, "ID", "Timestamp", "InvocationID")); diff != "" {
 						t.Errorf("event[i] mismatch (-want +got):\n%s", diff)
 					}
 				}
@@ -296,6 +324,10 @@ type FakeLLM struct {
 
 func (f *FakeLLM) Name() string {
 	return "fake-llm"
+}
+
+func (f *FakeLLM) Connect(ctx context.Context, req *model.LLMRequest) (model.LiveConnection, error) {
+	return nil, nil
 }
 
 func (f *FakeLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {

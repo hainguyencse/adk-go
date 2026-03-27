@@ -17,13 +17,17 @@ package session
 import (
 	"maps"
 	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"google.golang.org/adk/model"
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/model"
 )
 
 func Test_databaseService_Create(t *testing.T) {
@@ -827,7 +831,7 @@ func Test_databaseService_AppendEvent(t *testing.T) {
 	}
 }
 
-func Test_databaseService_StateManagement(t *testing.T) {
+func Test_inMemoryService_StateManagement(t *testing.T) {
 	ctx := t.Context()
 	appName := "my_app"
 
@@ -910,7 +914,16 @@ func Test_databaseService_StateManagement(t *testing.T) {
 			Actions:     EventActions{StateDelta: map[string]any{"temp:k1": "v1", "sk": "v2"}},
 			LLMResponse: model.LLMResponse{},
 		}
-		_ = s.AppendEvent(ctx, s1.Session.(*session), event)
+		err := s.AppendEvent(ctx, s1.Session.(*session), event)
+		if err != nil {
+			t.Fatalf("Failed to append event: %v", err)
+		}
+		invocationSession := s1.Session.(*session)
+		wantInvocationState := map[string]any{"sk": "v2", "temp:k1": "v1"}
+		gotInvocationState := maps.Collect(invocationSession.State().All())
+		if diff := cmp.Diff(wantInvocationState, gotInvocationState); diff != "" {
+			t.Errorf("Invocation session state mismatch (-want +got):\n%s", diff)
+		}
 
 		s1_got, _ := s.Get(ctx, &GetRequest{AppName: appName, UserID: "u1", SessionID: "s1"})
 		wantState := map[string]any{"sk": "v2"}
@@ -1000,3 +1013,84 @@ func emptyService(t *testing.T) Service {
 }
 
 // TODO: test concurrency
+func Test_inMemoryService_CreateConcurrentAccess(t *testing.T) {
+	s := InMemoryService()
+	const goroutines = 16
+	const attempts = 32
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+
+	req := &CreateRequest{
+		AppName:   "race-app",
+		UserID:    "race-user",
+		SessionID: "race-session",
+	}
+
+	var successCount atomic.Int32
+	var errorCount atomic.Int32
+
+	for range goroutines {
+		go func() {
+			defer wg.Done()
+			<-start
+			for range attempts {
+				_, err := s.Create(t.Context(), req)
+				if err == nil {
+					successCount.Add(1)
+				} else if strings.Contains(err.Error(), "already exists") {
+					errorCount.Add(1)
+				}
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+
+	if successCount.Load() != 1 {
+		t.Errorf("expected 1 successful creation, but got %d", successCount.Load())
+	}
+
+	expectedErrors := int32(goroutines*attempts - 1)
+	if errorCount.Load() != expectedErrors {
+		t.Errorf("expected %d 'already exists' errors, but got %d", expectedErrors, errorCount.Load())
+	}
+}
+
+func TestInMemorySession_AppendEvent_Deadlock(t *testing.T) {
+	ctx := t.Context()
+	service := InMemoryService()
+
+	// Create a session
+	createReq := &CreateRequest{
+		AppName: "testapp",
+		UserID:  "testuser",
+	}
+	createResp, err := service.Create(ctx, createReq)
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+	sess := createResp.Session
+
+	// Event with StateDelta to trigger updateSessionState
+	event := &Event{
+		ID:        "event1",
+		Timestamp: time.Now(),
+		Actions: EventActions{
+			StateDelta: map[string]any{
+				"test_key": "test_value",
+			},
+		},
+	}
+
+	// This call should hang if the deadlock is present
+	err = service.AppendEvent(ctx, sess, event)
+	if err != nil {
+		t.Fatalf("AppendEvent failed: %v", err)
+	}
+
+	// If it doesn't hang, the test passes (meaning no deadlock)
+	t.Log("AppendEvent did not deadlock")
+}

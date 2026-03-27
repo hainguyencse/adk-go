@@ -15,9 +15,10 @@
 package geminitool
 
 import (
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
-	"google.golang.org/genai"
 )
 
 // GoogleSearch is a built-in tool that is automatically invoked by Gemini 2
@@ -44,6 +45,6 @@ func (s GoogleSearch) ProcessRequest(ctx tool.Context, req *model.LLMRequest) er
 }
 
 // IsLongRunning implements tool.Tool.
-func (t GoogleSearch) IsLongRunning() bool {
+func (s GoogleSearch) IsLongRunning() bool {
 	return false
 }

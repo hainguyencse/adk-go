@@ -16,11 +16,13 @@ package context
 
 import (
 	"context"
+	"sync"
 
 	"github.com/google/uuid"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 type InvocationContextParams struct {
@@ -31,24 +33,48 @@ type InvocationContextParams struct {
 	Branch string
 	Agent  agent.Agent
 
-	UserContent   *genai.Content
-	RunConfig     *agent.RunConfig
-	EndInvocation bool
+	UserContent        *genai.Content
+	RunConfig          *agent.RunConfig
+	EndInvocation      bool
+	ResumabilityConfig *agent.ResumabilityConfig
+
+	LiveRequestQueue            *agent.LiveRequestQueue
+	LiveSessionResumptionHandle string
+
+	InvocationID string
 }
 
 func NewInvocationContext(ctx context.Context, params InvocationContextParams) agent.InvocationContext {
-	return &InvocationContext{
-		Context:      ctx,
-		params:       params,
-		invocationID: "e-" + uuid.NewString(),
+	if params.InvocationID == "" {
+		params.InvocationID = "e-" + uuid.NewString()
 	}
+	return &InvocationContext{
+		Context: ctx,
+		params:  params,
+		state: &invocationState{
+			endInvocation:               params.EndInvocation,
+			liveSessionResumptionHandle: params.LiveSessionResumptionHandle,
+			transcriptionCache:          make([]agent.TranscriptionEntry, 0),
+			inputRealtimeCache:          make([]agent.RealtimeCacheEntry, 0),
+			outputRealtimeCache:         make([]agent.RealtimeCacheEntry, 0),
+		},
+	}
+}
+
+type invocationState struct {
+	mu                          sync.RWMutex
+	endInvocation               bool
+	liveSessionResumptionHandle string
+	transcriptionCache          []agent.TranscriptionEntry
+	inputRealtimeCache          []agent.RealtimeCacheEntry
+	outputRealtimeCache         []agent.RealtimeCacheEntry
 }
 
 type InvocationContext struct {
 	context.Context
 
-	params       InvocationContextParams
-	invocationID string
+	params InvocationContextParams
+	state  *invocationState
 }
 
 func (c *InvocationContext) Artifacts() agent.Artifacts {
@@ -64,7 +90,7 @@ func (c *InvocationContext) Branch() string {
 }
 
 func (c *InvocationContext) InvocationID() string {
-	return c.invocationID
+	return c.params.InvocationID
 }
 
 func (c *InvocationContext) Memory() agent.Memory {
@@ -86,6 +112,73 @@ func (c *InvocationContext) RunConfig() *agent.RunConfig {
 func (c *InvocationContext) EndInvocation() {
 	c.params.EndInvocation = true
 }
+
 func (c *InvocationContext) Ended() bool {
 	return c.params.EndInvocation
 }
+
+func (c *InvocationContext) WithContext(ctx context.Context) agent.InvocationContext {
+	newCtx := *c
+	newCtx.Context = ctx
+	return &newCtx
+}
+
+func (c *InvocationContext) LiveRequestQueue() *agent.LiveRequestQueue {
+	return c.params.LiveRequestQueue
+}
+
+func (c *InvocationContext) TranscriptionCache() []agent.TranscriptionEntry {
+	c.state.mu.RLock()
+	defer c.state.mu.RUnlock()
+	return c.state.transcriptionCache
+}
+
+func (c *InvocationContext) LiveSessionResumptionHandle() string {
+	return c.params.LiveSessionResumptionHandle
+}
+
+func (c *InvocationContext) SetLiveSessionResumptionHandle(handle string) {
+	c.params.LiveSessionResumptionHandle = handle
+}
+
+func (c *InvocationContext) InputRealtimeCache() []agent.RealtimeCacheEntry {
+	c.state.mu.RLock()
+	defer c.state.mu.RUnlock()
+	return c.state.inputRealtimeCache
+}
+
+func (c *InvocationContext) OutputRealtimeCache() []agent.RealtimeCacheEntry {
+	c.state.mu.RLock()
+	defer c.state.mu.RUnlock()
+	return c.state.outputRealtimeCache
+}
+
+func (c *InvocationContext) ResumabilityConfig() *agent.ResumabilityConfig {
+	return c.params.ResumabilityConfig
+}
+
+func (c *InvocationContext) AppendInputRealtimeCache(entry agent.RealtimeCacheEntry) {
+	c.state.mu.Lock()
+	defer c.state.mu.Unlock()
+	c.state.inputRealtimeCache = append(c.state.inputRealtimeCache, entry)
+}
+
+func (c *InvocationContext) AppendOutputRealtimeCache(entry agent.RealtimeCacheEntry) {
+	c.state.mu.Lock()
+	defer c.state.mu.Unlock()
+	c.state.outputRealtimeCache = append(c.state.outputRealtimeCache, entry)
+}
+
+func (c *InvocationContext) ClearInputRealtimeCache() {
+	c.state.mu.Lock()
+	defer c.state.mu.Unlock()
+	c.state.inputRealtimeCache = nil
+}
+
+func (c *InvocationContext) ClearOutputRealtimeCache() {
+	c.state.mu.Lock()
+	defer c.state.mu.Unlock()
+	c.state.outputRealtimeCache = nil
+}
+
+var _ agent.InvocationContext = (*InvocationContext)(nil)

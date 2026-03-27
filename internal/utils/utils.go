@@ -18,10 +18,11 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 // TODO: split in proper files/packages.
@@ -35,9 +36,14 @@ const afFunctionCallIDPrefix = "adk-"
 func PopulateClientFunctionCallID(c *genai.Content) {
 	for _, fn := range FunctionCalls(c) {
 		if fn.ID == "" {
-			fn.ID = afFunctionCallIDPrefix + uuid.NewString()
+			fn.ID = GenerateFunctionCallID()
 		}
 	}
+}
+
+// GenerateFunctionCallID generates a new function call ID.
+func GenerateFunctionCallID() string {
+	return afFunctionCallIDPrefix + uuid.NewString()
 }
 
 // RemoveClientFunctionCallID removes the function call ID field that was set
@@ -125,6 +131,7 @@ func Must[T agent.Agent](a T, err error) T {
 	return a
 }
 
+// AppendInstructions appends instructions to the [genai.GenerateContentConfig.SystemInstruction] system instruction.
 func AppendInstructions(r *model.LLMRequest, instructions ...string) {
 	if len(instructions) == 0 {
 		return
@@ -136,9 +143,23 @@ func AppendInstructions(r *model.LLMRequest, instructions ...string) {
 		r.Config = &genai.GenerateContentConfig{}
 	}
 
+	if r.LiveConnectConfig == nil {
+		r.LiveConnectConfig = &genai.LiveConnectConfig{}
+	}
+
 	if r.Config.SystemInstruction == nil {
 		r.Config.SystemInstruction = genai.NewContentFromText(inst, genai.RoleUser)
+	} else if len(r.Config.SystemInstruction.Parts) > 0 && r.Config.SystemInstruction.Parts[len(r.Config.SystemInstruction.Parts)-1].Text != "" {
+		r.Config.SystemInstruction.Parts[len(r.Config.SystemInstruction.Parts)-1].Text += "\n\n" + inst
 	} else {
 		r.Config.SystemInstruction.Parts = append(r.Config.SystemInstruction.Parts, genai.NewPartFromText(inst))
+	}
+
+	if r.LiveConnectConfig.SystemInstruction == nil {
+		r.LiveConnectConfig.SystemInstruction = genai.NewContentFromText(inst, genai.RoleUser)
+	} else if len(r.LiveConnectConfig.SystemInstruction.Parts) > 0 && r.LiveConnectConfig.SystemInstruction.Parts[len(r.LiveConnectConfig.SystemInstruction.Parts)-1].Text != "" {
+		r.LiveConnectConfig.SystemInstruction.Parts[len(r.LiveConnectConfig.SystemInstruction.Parts)-1].Text += "\n\n" + inst
+	} else {
+		r.LiveConnectConfig.SystemInstruction.Parts = append(r.LiveConnectConfig.SystemInstruction.Parts, genai.NewPartFromText(inst))
 	}
 }

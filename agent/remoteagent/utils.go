@@ -19,14 +19,15 @@ import (
 	"slices"
 
 	"github.com/a2aproject/a2a-go/a2a"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/server/adka2a"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 type userFunctionCall struct {
-	event     *session.Event
+	response  *session.Event
 	taskID    a2a.TaskID
 	contextID string
 }
@@ -46,12 +47,12 @@ func getUserFunctionCallAt(events session.Events, index int) *userFunctionCall {
 		return nil
 	}
 	for i := index - 1; i >= 0; i-- {
-		event := events.At(i)
-		if !isFunctionCallEvent(event, fnCallID) {
+		request := events.At(i)
+		if !isFunctionCallEvent(request, fnCallID) {
 			continue
 		}
-		result := &userFunctionCall{event: candidate}
-		tid, ctxID := adka2a.GetA2ATaskInfo(event)
+		result := &userFunctionCall{response: candidate}
+		tid, ctxID := adka2a.GetA2ATaskInfo(request)
 		result.taskID = tid
 		result.contextID = ctxID
 		return result
@@ -88,7 +89,7 @@ func getFunctionResponseCallID(event *session.Event) (string, bool) {
 // Parts from all events we processed are returned as a single list.
 // The returned contextID might be an empty string. This means the current remote agent invocation is not associates with
 // any of the previous one. In this case a new contextID will be generated on the remote server.
-func toMissingRemoteSessionParts(ctx agent.InvocationContext, events session.Events) ([]a2a.Part, string) {
+func toMissingRemoteSessionParts(ctx agent.InvocationContext, events session.Events, cfg A2AConfig) ([]a2a.Part, string) {
 	partCount, contextID := 0, ""
 	// only events after this index are not in the remote session
 	lastRemoteResponseIndex := -1
@@ -113,7 +114,7 @@ func toMissingRemoteSessionParts(ctx agent.InvocationContext, events session.Eve
 		if event.Content == nil || len(event.Content.Parts) == 0 {
 			continue
 		}
-		parts, err := adka2a.ToA2AParts(event.Content.Parts, event.LongRunningToolIDs)
+		parts, err := convertParts(ctx, cfg, event)
 		if err != nil {
 			// TODO(yarolegovich): log error
 			continue

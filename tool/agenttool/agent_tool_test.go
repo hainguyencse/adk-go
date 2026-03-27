@@ -19,10 +19,11 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/internal/sessioninternal"
 	"google.golang.org/adk/internal/testutil"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/model"
@@ -30,7 +31,6 @@ import (
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/agenttool"
-	"google.golang.org/genai"
 )
 
 func TestAgentTool_Declaration(t *testing.T) {
@@ -308,7 +308,7 @@ func TestAgentTool_Run_SkipSummarization(t *testing.T) {
 	}
 }
 
-func createAgent(t *testing.T, inputSchema *genai.Schema, outputSchema *genai.Schema) agent.Agent {
+func createAgent(t *testing.T, inputSchema, outputSchema *genai.Schema) agent.Agent {
 	t.Helper()
 
 	model, err := gemini.NewModel(t.Context(), "gemini-2.5-flash", &genai.ClientConfig{
@@ -331,7 +331,7 @@ func createAgent(t *testing.T, inputSchema *genai.Schema, outputSchema *genai.Sc
 	return agent
 }
 
-func createAgentWithModel(t *testing.T, inputSchema *genai.Schema, outputSchema *genai.Schema, llmModel model.LLM) agent.Agent {
+func createAgentWithModel(t *testing.T, inputSchema, outputSchema *genai.Schema, llmModel model.LLM) agent.Agent {
 	t.Helper()
 	agent, err := llmagent.New(llmagent.Config{
 		Name:         "math_agent",
@@ -359,12 +359,10 @@ func createToolContext(t *testing.T, testAgent agent.Agent) tool.Context {
 	if err != nil {
 		t.Fatalf("Failed to create session: %v", err)
 	}
-	s := createResponse.Session
-	sessionImpl := sessioninternal.NewMutableSession(sessionService, s)
 
 	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
-		Session: sessionImpl,
+		Session: createResponse.Session,
 	})
 
-	return toolinternal.NewToolContext(ctx, "", &session.EventActions{})
+	return toolinternal.NewToolContext(ctx, "", &session.EventActions{}, nil)
 }

@@ -12,11 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package web provides a way to run ADK using a web server (extended by sublaunchers)
+// Package web provides a way to run ADK using a web server.
 package web
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -25,7 +26,9 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+
 	"google.golang.org/adk/cmd/launcher"
+	"google.golang.org/adk/cmd/launcher/internal/telemetry"
 	"google.golang.org/adk/cmd/launcher/universal"
 	"google.golang.org/adk/internal/cli/util"
 	"google.golang.org/adk/session"
@@ -33,10 +36,12 @@ import (
 
 // webConfig contains parameters for launching web server
 type webConfig struct {
-	port         int
-	writeTimeout time.Duration
-	readTimeout  time.Duration
-	idleTimeout  time.Duration
+	port            int
+	writeTimeout    time.Duration
+	readTimeout     time.Duration
+	idleTimeout     time.Duration
+	shutdownTimeout time.Duration
+	otelToCloud     bool
 }
 
 // webLauncher can launch web server
@@ -104,7 +109,6 @@ func (w *webLauncher) Keyword() string {
 // and then iterates through the remaining arguments to find and parse arguments
 // for any specified sublaunchers. It returns any arguments that are not processed.
 func (w *webLauncher) Parse(args []string) ([]string, error) {
-
 	keyToSublauncher := make(map[string]Sublauncher)
 	for _, l := range w.sublaunchers {
 		if _, ok := keyToSublauncher[l.Keyword()]; ok {
@@ -132,7 +136,7 @@ func (w *webLauncher) Parse(args []string) ([]string, error) {
 			// skip the keyword and move on
 			restArgs, err = sublauncher.Parse(restArgs[1:])
 			if err != nil {
-				return nil, fmt.Errorf("tha %q launcher cannot parse arguments: %v", keyword, err)
+				return nil, fmt.Errorf("the %q launcher cannot parse arguments: %v", keyword, err)
 			}
 			w.activeSublaunchers[keyword] = sublauncher
 		} else {
@@ -161,9 +165,11 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 	}
 
 	// Setup subrouters
-	for _, l := range w.activeSublaunchers {
-		if err := l.SetupSubrouters(router, config); err != nil {
-			return fmt.Errorf("%s subrouter setup failed: %v", l.Keyword(), err)
+	for _, l := range w.sublaunchers {
+		if _, isActive := w.activeSublaunchers[l.Keyword()]; isActive {
+			if err := l.SetupSubrouters(router, config); err != nil {
+				return fmt.Errorf("%s subrouter setup failed: %v", l.Keyword(), err)
+			}
 		}
 	}
 
@@ -184,12 +190,33 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 		Handler:      router,
 	}
 
-	err := srv.ListenAndServe()
+	errChan := make(chan error, 1)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			errChan <- err
+		}
+		close(errChan)
+	}()
+
+	telemetryService, err := telemetry.InitAndSetGlobalOtelProviders(ctx, config, w.config.otelToCloud)
 	if err != nil {
-		return fmt.Errorf("server failed: %v", err)
+		return fmt.Errorf("telemetry initialization failed: %v", err)
 	}
 
-	return nil
+	select {
+	case <-ctx.Done():
+		log.Println("Shutting down the web server...")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), w.config.shutdownTimeout)
+		defer cancel()
+		serverErr := srv.Shutdown(shutdownCtx)
+		telemetryErr := telemetryService.Shutdown(shutdownCtx)
+		return errors.Join(serverErr, telemetryErr)
+	case err, ok := <-errChan:
+		if !ok {
+			return nil
+		}
+		return fmt.Errorf("server failed: %v", err)
+	}
 }
 
 // SimpleDescription implements launcher.SubLauncher.
@@ -207,6 +234,8 @@ func NewLauncher(sublaunchers ...Sublauncher) launcher.SubLauncher {
 	fs.DurationVar(&config.writeTimeout, "write-timeout", 15*time.Second, "Server write timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for writing the response after reading the headers & body")
 	fs.DurationVar(&config.readTimeout, "read-timeout", 15*time.Second, "Server read timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for reading the whole request including body")
 	fs.DurationVar(&config.idleTimeout, "idle-timeout", 60*time.Second, "Server idle timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for waiting for the next request (only when keep-alive is enabled)")
+	fs.DurationVar(&config.shutdownTimeout, "shutdown-timeout", 15*time.Second, "Server shutdown timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for waiting for active requests to finish during shutdown")
+	fs.BoolVar(&config.otelToCloud, "otel_to_cloud", false, "Enables/disables OpenTelemetry export to GCP: telemetry.googleapis.com. See adk-go/telemetry package for details about supported options, credentials and environment variables.")
 
 	return &webLauncher{
 		config:       config,

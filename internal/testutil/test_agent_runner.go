@@ -21,12 +21,13 @@ import (
 	"iter"
 	"testing"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 type TestAgentRunner struct {
@@ -116,6 +117,30 @@ func NewTestAgentRunner(t *testing.T, agent agent.Agent) *TestAgentRunner {
 	}
 }
 
+// NewTestAgentRunner creates a new TestAgentRunner for the given agent as root
+// initSessionState will be used to init all sessions created by this runner.
+func NewTestAgentRunnerWithPluginManager(t *testing.T, agent agent.Agent, pluginConfig runner.PluginConfig) *TestAgentRunner {
+	appName := "test_app"
+	sessionService := session.InMemoryService()
+
+	runner, err := runner.New(runner.Config{
+		AppName:        appName,
+		Agent:          agent,
+		SessionService: sessionService,
+		PluginConfig:   pluginConfig,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return &TestAgentRunner{
+		agent:          agent,
+		sessionService: sessionService,
+		appName:        appName,
+		runner:         runner,
+	}
+}
+
 type MockModel struct {
 	Requests             []*model.LLMRequest
 	Responses            []*genai.Content
@@ -178,6 +203,10 @@ func (m *MockModel) GenerateStream(ctx context.Context, req *model.LLMRequest) i
 // Name implements llm.Model.
 func (m *MockModel) Name() string {
 	return "mock"
+}
+
+func (m *MockModel) Connect(ctx context.Context, req *model.LLMRequest) (model.LiveConnection, error) {
+	return nil, nil
 }
 
 var _ model.LLM = (*MockModel)(nil)

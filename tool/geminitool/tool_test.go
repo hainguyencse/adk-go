@@ -18,10 +18,11 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool/geminitool"
-	"google.golang.org/genai"
 )
 
 func TestGeminiTool_ProcessRequest(t *testing.T) {
@@ -69,7 +70,7 @@ func TestGeminiTool_ProcessRequest(t *testing.T) {
 
 	for _, tt := range testCases {
 		t.Run(tt.name, func(t *testing.T) {
-			geminiTool := geminitool.New("test_tool", tt.inputTool)
+			geminiTool := geminitool.New("test_tool", "test_description", tt.inputTool)
 
 			requestProcessor, ok := geminiTool.(toolinternal.RequestProcessor)
 			if !ok {

@@ -102,13 +102,25 @@ func TestSaveRequest_Validate(t *testing.T) {
 				Part:      genai.NewPartFromFunctionCall("example", nil),
 			},
 			wantErr:    true,
-			wantErrMsg: "invalid save request: Part.InlineData or Part.Text have to be set",
+			wantErrMsg: "invalid save request: Part.InlineData or Part.Text has to be set",
 		},
 		{
 			name:       "Completely empty request",
 			req:        &SaveRequest{},
 			wantErr:    true,
 			wantErrMsg: "invalid save request: missing required fields: AppName, UserID, SessionID, FileName, Part",
+		},
+		{
+			name: "FileName with path separator",
+			req: &SaveRequest{
+				AppName:   "MyApp",
+				UserID:    "user-123",
+				SessionID: "sess-abc",
+				FileName:  "path/to/file.txt",
+				Part:      genai.NewPartFromBytes([]byte("data"), "text/plain"),
+			},
+			wantErr:    true,
+			wantErrMsg: "invalid name: filename cannot contain path separators",
 		},
 	}
 	executeValidatorTestCases(t, "SaveRequest", testCases)
@@ -152,6 +164,17 @@ func TestLoadRequest_Validate(t *testing.T) {
 			wantErr:    true,
 			wantErrMsg: "invalid load request: missing required fields: AppName, UserID, SessionID, FileName",
 		},
+		{
+			name: "FileName with path separator",
+			req: &LoadRequest{
+				AppName:   "MyApp",
+				UserID:    "user-123",
+				SessionID: "sess-abc",
+				FileName:  "a/b.txt",
+			},
+			wantErr:    true,
+			wantErrMsg: "invalid name: filename cannot contain path separators",
+		},
 	}
 	executeValidatorTestCases(t, "LoadRequest", testCases)
 }
@@ -193,6 +216,17 @@ func TestDeleteRequest_Validate(t *testing.T) {
 			req:        &DeleteRequest{},
 			wantErr:    true,
 			wantErrMsg: "invalid delete request: missing required fields: AppName, UserID, SessionID, FileName",
+		},
+		{
+			name: "FileName with path separator",
+			req: &DeleteRequest{
+				AppName:   "MyApp",
+				UserID:    "user-123",
+				SessionID: "sess-abc",
+				FileName:  "dir/file.txt",
+			},
+			wantErr:    true,
+			wantErrMsg: "invalid name: filename cannot contain path separators",
 		},
 	}
 	executeValidatorTestCases(t, "DeleteRequest", testCases)
@@ -275,6 +309,17 @@ func TestVersionsRequest_Validate(t *testing.T) {
 			req:        &VersionsRequest{},
 			wantErr:    true,
 			wantErrMsg: "invalid versions request: missing required fields: AppName, UserID, SessionID, FileName",
+		},
+		{
+			name: "FileName with path separator",
+			req: &VersionsRequest{
+				AppName:   "MyApp",
+				UserID:    "user-123",
+				SessionID: "sess-abc",
+				FileName:  "folder/file.txt",
+			},
+			wantErr:    true,
+			wantErrMsg: "invalid name: filename cannot contain path separators",
 		},
 	}
 	executeValidatorTestCases(t, "VersionsRequest", testCases)

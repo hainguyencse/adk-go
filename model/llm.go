@@ -26,13 +26,15 @@ import (
 type LLM interface {
 	Name() string
 	GenerateContent(ctx context.Context, req *LLMRequest, stream bool) iter.Seq2[*LLMResponse, error]
+	Connect(ctx context.Context, req *LLMRequest) (LiveConnection, error)
 }
 
 // LLMRequest is the raw LLM request.
 type LLMRequest struct {
-	Model    string
-	Contents []*genai.Content
-	Config   *genai.GenerateContentConfig
+	Model             string
+	Contents          []*genai.Content
+	Config            *genai.GenerateContentConfig
+	LiveConnectConfig *genai.LiveConnectConfig
 
 	Tools map[string]any `json:"-"`
 }
@@ -46,8 +48,11 @@ type LLMResponse struct {
 	UsageMetadata     *genai.GenerateContentResponseUsageMetadata
 	CustomMetadata    map[string]any
 	LogprobsResult    *genai.LogprobsResult
+	ModelVersion      string
 	// Partial indicates whether the content is part of a unfinished content stream.
 	// Only used for streaming mode and when the content is plain text.
+	// The Runner fully processes only the final non-partial event, partial
+	// events are simply forwarded downstream (eg. to UI for display).
 	Partial bool
 	// Indicates whether the response from the model is complete.
 	// Only used for streaming mode.
@@ -59,4 +64,31 @@ type LLMResponse struct {
 	ErrorMessage string
 	FinishReason genai.FinishReason
 	AvgLogprobs  float64
+
+	LiveSessionResumptionUpdate *genai.LiveServerSessionResumptionUpdate
+
+	// Audio transcription of user input (from Gemini Live API).
+	InputTranscription *genai.Transcription
+	// Audio transcription of model output (from Gemini Live API).
+	OutputTranscription *genai.Transcription
+	LiveGoAway          *genai.LiveServerGoAway
+}
+
+// LiveRequest is the request to be sent to the model in the live stream.
+type LiveRequest struct {
+	Content       *genai.Content
+	RealtimeInput *genai.LiveRealtimeInput
+	ToolResponse  *genai.LiveToolResponseInput
+	ActivityStart *genai.ActivityStart
+	ActivityEnd   *genai.ActivityEnd
+	Close         bool
+}
+
+// LiveConnection represents a bidirectional streaming connection to the LLM.
+type LiveConnection interface {
+	SendHistory(contents []*genai.Content) error
+	SendContent(content *genai.Content) error
+	SendRealtime(input *genai.LiveRealtimeInput) error
+	Receive(ctx context.Context) (<-chan *LLMResponse, <-chan error)
+	Close() error
 }

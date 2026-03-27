@@ -20,6 +20,10 @@ import (
 	"fmt"
 	"iter"
 	"log"
+	"strings"
+	"time"
+
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
@@ -29,11 +33,12 @@ import (
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/llminternal"
 	imemory "google.golang.org/adk/internal/memory"
-	"google.golang.org/adk/internal/sessioninternal"
+	"google.golang.org/adk/internal/plugininternal"
+	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/plugin"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 // Config is used to create a [Runner].
@@ -47,6 +52,29 @@ type Config struct {
 	ArtifactService artifact.Service
 	// optional
 	MemoryService memory.Service
+
+	ResumabilityConfig *agent.ResumabilityConfig
+
+	// optional
+	PluginConfig PluginConfig
+}
+
+type PluginConfig struct {
+	Plugins      []*plugin.Plugin
+	CloseTimeout time.Duration
+}
+
+type RunOption func(*runOptions)
+
+type runOptions struct {
+	stateDelta map[string]any
+}
+
+// WithStateDelta sets a state delta for the run invocation.
+func WithStateDelta(delta map[string]any) RunOption {
+	return func(o *runOptions) {
+		o.stateDelta = delta
+	}
 }
 
 // New creates a new [Runner].
@@ -64,13 +92,23 @@ func New(cfg Config) (*Runner, error) {
 		return nil, fmt.Errorf("failed to create agent tree: %w", err)
 	}
 
+	pluginManager, err := plugininternal.NewPluginManager(plugininternal.PluginConfig{
+		Plugins:      cfg.PluginConfig.Plugins,
+		CloseTimeout: cfg.PluginConfig.CloseTimeout,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create plugin manager: %w", err)
+	}
+
 	return &Runner{
-		appName:         cfg.AppName,
-		rootAgent:       cfg.Agent,
-		sessionService:  cfg.SessionService,
-		artifactService: cfg.ArtifactService,
-		memoryService:   cfg.MemoryService,
-		parents:         parents,
+		appName:            cfg.AppName,
+		rootAgent:          cfg.Agent,
+		sessionService:     cfg.SessionService,
+		artifactService:    cfg.ArtifactService,
+		memoryService:      cfg.MemoryService,
+		parents:            parents,
+		pluginManager:      pluginManager,
+		resumabilityConfig: cfg.ResumabilityConfig,
 	}, nil
 }
 
@@ -84,17 +122,25 @@ type Runner struct {
 	artifactService artifact.Service
 	memoryService   memory.Service
 
-	parents parentmap.Map
+	resumabilityConfig *agent.ResumabilityConfig
+
+	parents       parentmap.Map
+	pluginManager *plugininternal.PluginManager
 }
 
 // Run runs the agent for the given user input, yielding events from agents.
 // For each user message it finds the proper agent within an agent tree to
 // continue the conversation within the session.
-func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig) iter.Seq2[*session.Event, error] {
+func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig, opts ...RunOption) iter.Seq2[*session.Event, error] {
 	// TODO(hakim): we need to validate whether cfg is compatible with the Agent.
 	//   see adk-python/src/google/adk/runners.py Runner._new_invocation_context.
 	// TODO: setup tracer.
 	return func(yield func(*session.Event, error) bool) {
+		options := runOptions{}
+		for _, opt := range opts {
+			opt(&options)
+		}
+
 		resp, err := r.sessionService.Get(ctx, &session.GetRequest{
 			AppName:   r.appName,
 			UserID:    userID,
@@ -105,9 +151,9 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			return
 		}
 
-		session := resp.Session
+		storedSession := resp.Session
 
-		agentToRun, err := r.findAgentToRun(session)
+		agentToRun, err := r.findAgentToRun(storedSession, msg)
 		if err != nil {
 			yield(nil, err)
 			return
@@ -117,14 +163,15 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
 			StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
 		})
+		ctx = plugininternal.ToContext(ctx, r.pluginManager)
 
 		var artifacts agent.Artifacts
 		if r.artifactService != nil {
 			artifacts = &artifactinternal.Artifacts{
 				Service:   r.artifactService,
-				SessionID: session.ID(),
-				AppName:   session.AppName(),
-				UserID:    session.UserID(),
+				SessionID: storedSession.ID(),
+				AppName:   storedSession.AppName(),
+				UserID:    storedSession.UserID(),
 			}
 		}
 
@@ -132,24 +179,46 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		if r.memoryService != nil {
 			memoryImpl = &imemory.Memory{
 				Service:   r.memoryService,
-				SessionID: session.ID(),
-				UserID:    session.UserID(),
-				AppName:   session.AppName(),
+				SessionID: storedSession.ID(),
+				UserID:    storedSession.UserID(),
+				AppName:   storedSession.AppName(),
 			}
 		}
 
 		ctx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 			Artifacts:   artifacts,
 			Memory:      memoryImpl,
-			Session:     sessioninternal.NewMutableSession(r.sessionService, session),
+			Session:     storedSession,
 			Agent:       agentToRun,
 			UserContent: msg,
 			RunConfig:   &cfg,
 		})
-
-		if err := r.appendMessageToSession(ctx, session, msg, cfg.SaveInputBlobsAsArtifacts); err != nil {
+		ctx, err = r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager, options.stateDelta)
+		if err != nil {
 			yield(nil, err)
 			return
+		}
+
+		pluginManager := r.pluginManager
+		if pluginManager != nil {
+			// Defer the after run callbacks to perform global cleanup tasks or finalizing logs and metrics data.
+			// This does NOT emit any event.
+			defer pluginManager.RunAfterRunCallback(ctx)
+
+			earlyExitResult, err := pluginManager.RunBeforeRunCallback(ctx)
+			if earlyExitResult != nil || err != nil {
+				earlyExitEvent := session.NewEvent(ctx.InvocationID())
+				earlyExitEvent.Author = "user"
+				earlyExitEvent.LLMResponse = model.LLMResponse{
+					Content: msg,
+				}
+				if err := r.sessionService.AppendEvent(ctx, storedSession, earlyExitEvent); err != nil {
+					yield(nil, fmt.Errorf("failed to add event to session: %w", err))
+					return
+				}
+				yield(earlyExitEvent, err)
+				return
+			}
 		}
 
 		for event, err := range agentToRun.Run(ctx) {
@@ -160,9 +229,22 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 				continue
 			}
 
+			if pluginManager != nil {
+				modifiedEvent, err := pluginManager.RunOnEventCallback(ctx, event)
+				if err != nil {
+					if !yield(nil, err) {
+						return
+					}
+					continue
+				}
+				if modifiedEvent != nil {
+					event = modifiedEvent
+				}
+			}
+
 			// only commit non-partial event to a session service
 			if !event.LLMResponse.Partial {
-				if err := r.sessionService.AppendEvent(ctx, session, event); err != nil {
+				if err := r.sessionService.AppendEvent(ctx, storedSession, event); err != nil {
 					yield(nil, fmt.Errorf("failed to add event to session: %w", err))
 					return
 				}
@@ -175,9 +257,233 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 	}
 }
 
-func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool) error {
+func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequestQueue *agent.LiveRequestQueue, cfg agent.RunConfig) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		if len(cfg.ResponseModalities) == 0 {
+			cfg.ResponseModalities = []genai.Modality{genai.ModalityAudio}
+		}
+		isResponseAudio := false
+		for _, modality := range cfg.ResponseModalities {
+			if modality == genai.ModalityAudio {
+				isResponseAudio = true
+				break
+			}
+		}
+
+		// TODO: Should support config:
+		// - Not set. input_audio_transcription (1)
+		// - set nil to disable input_audio_transcription (2)
+		// - set value to enable input_audio_transcription (3)
+		// Currently, can not detect case (1), (2)
+		if isResponseAudio && cfg.InputAudioTranscription == nil {
+			cfg.InputAudioTranscription = &genai.AudioTranscriptionConfig{}
+		}
+		if isResponseAudio && cfg.OutputAudioTranscription == nil {
+			cfg.OutputAudioTranscription = &genai.AudioTranscriptionConfig{}
+		}
+
+		if strings.TrimSpace(userID) == "" || strings.TrimSpace(sessionID) == "" {
+			yield(nil, fmt.Errorf("userID and sessionID must be provided."))
+			return
+		}
+
+		if liveRequestQueue == nil {
+			yield(nil, fmt.Errorf("live request queue must be provided"))
+			return
+		}
+
+		var storedSession session.Session
+		resp, err := r.sessionService.Get(ctx, &session.GetRequest{
+			AppName:   r.appName,
+			UserID:    userID,
+			SessionID: sessionID,
+		})
+		if err != nil {
+			// create if not exists
+			createResp, err := r.sessionService.Create(ctx, &session.CreateRequest{
+				AppName:   r.appName,
+				UserID:    userID,
+				SessionID: sessionID,
+			})
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+
+			storedSession = createResp.Session
+		} else {
+			storedSession = resp.Session
+		}
+
+		// For live multi-agents system, we need model's text transcription as
+		// context for the transferred agent.
+		if len(r.rootAgent.SubAgents()) > 0 && isResponseAudio {
+			if cfg.InputAudioTranscription == nil {
+				cfg.InputAudioTranscription = &genai.AudioTranscriptionConfig{}
+			}
+			if cfg.OutputAudioTranscription == nil {
+				cfg.OutputAudioTranscription = &genai.AudioTranscriptionConfig{}
+			}
+		}
+
+		agentToRun, err := r.findAgentToRunFromLastEvent(storedSession, r.rootAgent)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+
+		invCtx := r.newInvocationContextForLive(ctx, userID, sessionID, liveRequestQueue, cfg, agentToRun, storedSession)
+
+		pluginManager := r.pluginManager
+		if pluginManager != nil {
+			defer pluginManager.RunAfterRunCallback(invCtx)
+
+			earlyExitResult, err := pluginManager.RunBeforeRunCallback(invCtx)
+			if earlyExitResult != nil || err != nil {
+				earlyExitEvent := session.NewEvent(invCtx.InvocationID())
+				earlyExitEvent.Author = "user"
+				if err := r.sessionService.AppendEvent(ctx, storedSession, earlyExitEvent); err != nil {
+					yield(nil, fmt.Errorf("failed to add event to session: %w", err))
+					return
+				}
+				yield(earlyExitEvent, err)
+				return
+			}
+		}
+
+		for event, err := range agentToRun.RunLive(invCtx) {
+			if err != nil {
+				if !yield(event, err) {
+					return
+				}
+				continue
+			}
+
+			// ======== [BEGIN] TODO: Should check this block code ========
+			if pluginManager != nil {
+				modifiedEvent, err := pluginManager.RunOnEventCallback(invCtx, event)
+				if err != nil {
+					if !yield(nil, err) {
+						return
+					}
+					continue
+				}
+				if modifiedEvent != nil {
+					event = modifiedEvent
+				}
+			}
+
+			// only commit non-partial event to a session service
+			if !event.LLMResponse.Partial {
+				if err := r.sessionService.AppendEvent(invCtx, storedSession, event); err != nil {
+					yield(nil, fmt.Errorf("failed to add event to session: %w", err))
+					return
+				}
+			}
+			// ======== [END] TODO: Should check this block code ========
+
+			if !yield(event, nil) {
+				return
+			}
+		}
+	}
+}
+
+func (r *Runner) newInvocationContextForLive(ctx context.Context, userID, sessionID string, liveRequestQueue *agent.LiveRequestQueue, cfg agent.RunConfig, agentToRun agent.Agent, session session.Session) agent.InvocationContext {
+	liveConnectConfig := &genai.LiveConnectConfig{
+		ResponseModalities:       cfg.ResponseModalities,
+		SpeechConfig:             cfg.SpeechConfig,
+		InputAudioTranscription:  cfg.InputAudioTranscription,
+		OutputAudioTranscription: cfg.OutputAudioTranscription,
+		RealtimeInputConfig:      cfg.RealtimeInputConfig,
+		ContextWindowCompression: cfg.ContextWindowCompression,
+		Proactivity:              cfg.Proactivity,
+	}
+
+	if cfg.ExplicitVADSignal {
+		liveConnectConfig.ExplicitVADSignal = &cfg.ExplicitVADSignal
+	}
+	if cfg.EnableAffectiveDialog {
+		liveConnectConfig.EnableAffectiveDialog = &cfg.EnableAffectiveDialog
+	}
+
+	// TODO: Should double check logic resumability
+	if r.resumabilityConfig != nil && r.resumabilityConfig.IsResumable {
+		if cfg.SessionResumption != nil {
+			liveConnectConfig.SessionResumption = cfg.SessionResumption
+		} else {
+			liveConnectConfig.SessionResumption = &genai.SessionResumptionConfig{
+				Handle:      fmt.Sprintf("%s_%s", sessionID, userID),
+				Transparent: true,
+			}
+		}
+	}
+
+	ctx = parentmap.ToContext(ctx, r.parents)
+	ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
+		StreamingMode:     runconfig.StreamingMode(cfg.StreamingMode),
+		LiveConnectConfig: liveConnectConfig,
+	})
+	ctx = plugininternal.ToContext(ctx, r.pluginManager)
+
+	var artifacts agent.Artifacts
+	if r.artifactService != nil {
+		artifacts = &artifactinternal.Artifacts{
+			Service:   r.artifactService,
+			SessionID: session.ID(),
+			AppName:   session.AppName(),
+			UserID:    session.UserID(),
+		}
+	}
+
+	var memoryImpl agent.Memory = nil
+	if r.memoryService != nil {
+		memoryImpl = &imemory.Memory{
+			Service:   r.memoryService,
+			SessionID: session.ID(),
+			UserID:    session.UserID(),
+			AppName:   session.AppName(),
+		}
+	}
+
+	invCtx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+		Artifacts:        artifacts,
+		Memory:           memoryImpl,
+		Session:          session,
+		Agent:            agentToRun,
+		RunConfig:        &cfg,
+		LiveRequestQueue: liveRequestQueue,
+		//TODO in go we dont have this stored anywhere yet.
+		LiveSessionResumptionHandle: "",
+		ResumabilityConfig:          r.resumabilityConfig,
+	})
+
+	return invCtx
+}
+
+// func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool, pluginManager *plugininternal.PluginManager) (agent.InvocationContext, error) {
+func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool, pluginManager *plugininternal.PluginManager, stateDelta map[string]any) (agent.InvocationContext, error) {
 	if msg == nil {
-		return nil
+		return ctx, nil
+	}
+	if pluginManager != nil {
+		modifiedMsg, err := pluginManager.RunOnUserMessageCallback(ctx, msg)
+		if err != nil {
+			return ctx, fmt.Errorf("error running on run user message callback : %w", err)
+		}
+		if modifiedMsg != nil {
+			msg = modifiedMsg
+			// update ctx user message
+			ctx = icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+				Artifacts:    ctx.Artifacts(),
+				Memory:       ctx.Memory(),
+				Session:      ctx.Session(),
+				Agent:        ctx.Agent(),
+				UserContent:  msg,
+				RunConfig:    ctx.RunConfig(),
+				InvocationID: ctx.InvocationID(),
+			})
+		}
 	}
 
 	artifactsService := ctx.Artifacts()
@@ -188,7 +494,7 @@ func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSessi
 			}
 			fileName := fmt.Sprintf("artifact_%s_%d", ctx.InvocationID(), i)
 			if _, err := artifactsService.Save(ctx, fileName, part); err != nil {
-				return fmt.Errorf("failed to save artifact %s: %w", fileName, err)
+				return ctx, fmt.Errorf("failed to save artifact %s: %w", fileName, err)
 			}
 			// Replace the part with a text placeholder
 			msg.Parts[i] = &genai.Part{
@@ -203,21 +509,30 @@ func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSessi
 	event.LLMResponse = model.LLMResponse{
 		Content: msg,
 	}
+	if stateDelta != nil {
+		event.Actions.StateDelta = stateDelta
+	}
 
 	if err := r.sessionService.AppendEvent(ctx, storedSession, event); err != nil {
-		return fmt.Errorf("failed to append event to sessionService: %w", err)
+		return ctx, fmt.Errorf("failed to append event to sessionService: %w", err)
 	}
-	return nil
+	return ctx, nil
 }
 
 // findAgentToRun returns the agent that should handle the next request based on
 // session history.
-func (r *Runner) findAgentToRun(session session.Session) (agent.Agent, error) {
+func (r *Runner) findAgentToRun(session session.Session, msg *genai.Content) (agent.Agent, error) {
+	if event := handleUserFunctionCallResponse(session.Events(), msg); event != nil {
+		subAgent := findAgent(r.rootAgent, event.Author)
+		if subAgent != nil {
+			return subAgent, nil
+		}
+		log.Printf("Function call from an unknown agent: %s, event id: %s", event.Author, event.ID)
+	}
+
 	events := session.Events()
 	for i := events.Len() - 1; i >= 0; i-- {
 		event := events.At(i)
-
-		// TODO: findMatchingFunctionCall.
 
 		if event.Author == "user" {
 			continue
@@ -226,7 +541,7 @@ func (r *Runner) findAgentToRun(session session.Session) (agent.Agent, error) {
 		subAgent := findAgent(r.rootAgent, event.Author)
 		// Agent not found, continue looking for the other event.
 		if subAgent == nil {
-			log.Printf("Event from an unknown agent: %s, event id: %s", event.Author, event.ID)
+			// Event from unknown agent, continue looking for the other event.
 			continue
 		}
 
@@ -237,6 +552,62 @@ func (r *Runner) findAgentToRun(session session.Session) (agent.Agent, error) {
 
 	// Falls back to root agent if no suitable agents are found in the session.
 	return r.rootAgent, nil
+}
+
+func (r *Runner) findAgentToRunFromLastEvent(session session.Session, rootAgent agent.Agent) (agent.Agent, error) {
+	if session.Events().Len() == 0 {
+		return rootAgent, nil
+	}
+
+	events := session.Events()
+	for i := events.Len() - 1; i >= 0; i-- {
+		event := events.At(i)
+
+		if event.Author == "user" {
+			continue
+		}
+
+		subAgent := findAgent(r.rootAgent, event.Author)
+		// Agent not found, continue looking for the other event.
+		if subAgent == nil {
+			// Event from unknown agent, continue looking for the other event.
+			continue
+		}
+
+		if r.isTransferableAcrossAgentTree(subAgent) {
+			return subAgent, nil
+		}
+	}
+
+	// Falls back to root agent if no suitable agents are found in the session.
+	return r.rootAgent, nil
+}
+
+// handleUserFunctionCallResponse finds the function call event that matches the function response id
+// delivered by the user in the latest event.
+func handleUserFunctionCallResponse(events session.Events, msg *genai.Content) *session.Event {
+	if events.Len() == 0 {
+		return nil
+	}
+
+	functionResponses := utils.FunctionResponses(msg)
+	if len(functionResponses) == 0 {
+		return nil
+	}
+
+	// This assumes that even if user provides multiple function responses, all the function calls
+	// were made by the same agent. Otherwise it would be impossible to rearrange session events
+	// such that every function response has a corresponding call filtering by author.
+	callID := functionResponses[0].ID
+	for i := events.Len() - 1; i >= 0; i-- {
+		event := events.At(i)
+		for _, part := range utils.FunctionCalls(event.Content) {
+			if part.ID == callID {
+				return event
+			}
+		}
+	}
+	return nil
 }
 
 // checks if the agent and its parent chain allow transfer up the tree.

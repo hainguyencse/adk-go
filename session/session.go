@@ -20,7 +20,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/tool/toolconfirmation"
+	"google.golang.org/genai"
 )
 
 // Session represents a series of interactions between a user and agents.
@@ -127,13 +130,47 @@ func (e *Event) IsFinalResponse() bool {
 	return !hasFunctionCalls(&e.LLMResponse) && !hasFunctionResponses(&e.LLMResponse) && !e.LLMResponse.Partial && !hasTrailingCodeExecutionResult(&e.LLMResponse)
 }
 
+func (e *Event) FunctionCalls() []*genai.FunctionCall {
+	content := e.Content
+	if content == nil {
+		content = e.LLMResponse.Content
+	}
+	var funcCalls []*genai.FunctionCall
+	if content == nil {
+		return funcCalls
+	}
+	for _, part := range content.Parts {
+		if part.FunctionCall != nil {
+			funcCalls = append(funcCalls, part.FunctionCall)
+		}
+	}
+	return funcCalls
+}
+
+func (e *Event) FunctionResponses() []*genai.FunctionResponse {
+	content := e.Content
+	if content == nil {
+		content = e.LLMResponse.Content
+	}
+	var funcResponses []*genai.FunctionResponse
+	if content == nil {
+		return funcResponses
+	}
+	for _, part := range content.Parts {
+		if part.FunctionResponse != nil {
+			funcResponses = append(funcResponses, part.FunctionResponse)
+		}
+	}
+	return funcResponses
+}
+
 // NewEvent creates a new event defining now as the timestamp.
 func NewEvent(invocationID string) *Event {
 	return &Event{
 		ID:           uuid.NewString(),
 		InvocationID: invocationID,
 		Timestamp:    time.Now(),
-		Actions:      EventActions{StateDelta: make(map[string]any)},
+		Actions:      EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)},
 	}
 }
 
@@ -145,6 +182,8 @@ type EventActions struct {
 	// Indicates that the event is updating an artifact. key is the filename,
 	// value is the version.
 	ArtifactDelta map[string]int64
+
+	RequestedToolConfirmations map[string]toolconfirmation.ToolConfirmation
 
 	// If true, it won't call model to summarize function response.
 	// Only valid for function response event.

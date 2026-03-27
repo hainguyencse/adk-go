@@ -19,12 +19,16 @@ import (
 	"fmt"
 	"iter"
 
+	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/artifact"
 	agentinternal "google.golang.org/adk/internal/agent"
+	"google.golang.org/adk/internal/plugininternal/plugincontext"
+	"google.golang.org/adk/internal/telemetry"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 // Agent is the base interface which all agents must implement.
@@ -40,6 +44,7 @@ type Agent interface {
 	Name() string
 	Description() string
 	Run(InvocationContext) iter.Seq2[*session.Event, error]
+	RunLive(InvocationContext) iter.Seq2[*session.Event, error]
 	SubAgents() []Agent
 
 	internal() *agent
@@ -60,6 +65,7 @@ func New(cfg Config) (Agent, error) {
 		subAgents:            cfg.SubAgents,
 		beforeAgentCallbacks: cfg.BeforeAgentCallbacks,
 		run:                  cfg.Run,
+		runLive:              cfg.RunLive,
 		afterAgentCallbacks:  cfg.AfterAgentCallbacks,
 		State: agentinternal.State{
 			AgentType: agentinternal.TypeCustomAgent,
@@ -91,6 +97,8 @@ type Config struct {
 	BeforeAgentCallbacks []BeforeAgentCallback
 	// Run is the function that defines the agent's behavior.
 	Run func(InvocationContext) iter.Seq2[*session.Event, error]
+	// RunLive is the function that defines the agent's behavior for live requests.
+	RunLive func(InvocationContext) iter.Seq2[*session.Event, error]
 	// AfterAgentCallbacks is a list of callbacks that are called sequentially
 	// after the agent has completed its run.
 	//
@@ -138,6 +146,7 @@ type agent struct {
 
 	beforeAgentCallbacks []BeforeAgentCallback
 	run                  func(InvocationContext) iter.Seq2[*session.Event, error]
+	runLive              func(InvocationContext) iter.Seq2[*session.Event, error]
 	afterAgentCallbacks  []AfterAgentCallback
 }
 
@@ -155,9 +164,17 @@ func (a *agent) SubAgents() []Agent {
 
 func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
+		spanCtx, span := telemetry.StartInvokeAgentSpan(ctx, a, ctx.Session().ID(), ctx.InvocationID())
+		yield, endSpan := telemetry.WrapYield(span, yield, func(span trace.Span, event *session.Event, err error) {
+			telemetry.TraceAgentResult(span, telemetry.TraceAgentResultParams{
+				ResponseEvent: event,
+				Error:         err,
+			})
+		})
+		defer endSpan()
 		// TODO: verify&update the setup here. Should we branch etc.
 		ctx := &invocationContext{
-			Context:   ctx,
+			Context:   ctx.WithContext(spanCtx),
 			agent:     a,
 			artifacts: ctx.Artifacts(),
 			memory:    ctx.Memory(),
@@ -169,7 +186,6 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			runConfig:     ctx.RunConfig(),
 			endInvocation: ctx.Ended(),
 		}
-
 		event, err := runBeforeAgentCallbacks(ctx)
 		if event != nil || err != nil {
 			if !yield(event, err) {
@@ -182,6 +198,57 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 		}
 
 		for event, err := range a.run(ctx) {
+			if event != nil && event.Author == "" {
+				event.Author = getAuthorForEvent(ctx, event)
+			}
+			if !yield(event, err) {
+				return
+			}
+		}
+
+		if ctx.Ended() {
+			return
+		}
+
+		event, err = runAfterAgentCallbacks(ctx)
+		if event != nil || err != nil {
+			yield(event, err)
+		}
+	}
+}
+
+func (a *agent) RunLive(ctx InvocationContext) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		ctx := &invocationContext{
+			Context:                     ctx,
+			agent:                       a,
+			artifacts:                   ctx.Artifacts(),
+			memory:                      ctx.Memory(),
+			session:                     ctx.Session(),
+			invocationID:                ctx.InvocationID(),
+			branch:                      ctx.Branch(),
+			userContent:                 ctx.UserContent(),
+			runConfig:                   ctx.RunConfig(),
+			endInvocation:               ctx.Ended(),
+			liveRequestQueue:            ctx.LiveRequestQueue(),
+			resumabilityConfig:          ctx.ResumabilityConfig(),
+			liveSessionResumptionHandle: ctx.LiveSessionResumptionHandle(),
+			transcriptionCache:          ctx.TranscriptionCache(),
+			inputRealtimeCache:          ctx.InputRealtimeCache(),
+			outputRealtimeCache:         ctx.OutputRealtimeCache(),
+		}
+		event, err := runBeforeAgentCallbacks(ctx)
+		if event != nil || err != nil {
+			if !yield(event, err) {
+				return
+			}
+		}
+
+		if ctx.Ended() {
+			return
+		}
+
+		for event, err := range a.runLive(ctx) {
 			if event != nil && event.Author == "" {
 				event.Author = getAuthorForEvent(ctx, event)
 			}
@@ -217,11 +284,30 @@ func getAuthorForEvent(ctx InvocationContext, event *session.Event) string {
 // then it skips agent run and returns callback result.
 func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	agent := ctx.Agent()
+	pluginManager := pluginManagerFromContext(ctx)
 
 	callbackCtx := &callbackContext{
 		Context:           ctx,
 		invocationContext: ctx,
-		actions:           &session.EventActions{StateDelta: make(map[string]any)},
+		actions:           &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)},
+	}
+
+	if pluginManager != nil {
+		content, err := pluginManager.RunBeforeAgentCallback(callbackCtx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to run plugin before agent callback: %w", err)
+		}
+		if content != nil {
+			event := session.NewEvent(ctx.InvocationID())
+			event.LLMResponse = model.LLMResponse{
+				Content: content,
+			}
+			event.Author = agent.Name()
+			event.Branch = ctx.Branch()
+			event.Actions = *callbackCtx.actions
+			ctx.EndInvocation()
+			return event, nil
+		}
 	}
 
 	for _, callback := range ctx.Agent().internal().beforeAgentCallbacks {
@@ -260,11 +346,29 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 // then it create a new event with the new content and state delta.
 func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	agent := ctx.Agent()
+	pluginManager := pluginManagerFromContext(ctx)
 
 	callbackCtx := &callbackContext{
 		Context:           ctx,
 		invocationContext: ctx,
-		actions:           &session.EventActions{StateDelta: make(map[string]any)},
+		actions:           &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)},
+	}
+
+	if pluginManager != nil {
+		content, err := pluginManager.RunAfterAgentCallback(callbackCtx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to run plugin after agent callback: %w", err)
+		}
+		if content != nil {
+			event := session.NewEvent(ctx.InvocationID())
+			event.LLMResponse = model.LLMResponse{
+				Content: content,
+			}
+			event.Author = agent.Name()
+			event.Branch = ctx.Branch()
+			event.Actions = *callbackCtx.actions
+			return event, nil
+		}
 	}
 
 	for _, callback := range agent.internal().afterAgentCallbacks {
@@ -390,6 +494,13 @@ type invocationContext struct {
 	userContent   *genai.Content
 	runConfig     *RunConfig
 	endInvocation bool
+
+	liveRequestQueue            *LiveRequestQueue
+	transcriptionCache          []TranscriptionEntry
+	inputRealtimeCache          []RealtimeCacheEntry
+	outputRealtimeCache         []RealtimeCacheEntry
+	resumabilityConfig          *ResumabilityConfig
+	liveSessionResumptionHandle string
 }
 
 func (c *invocationContext) Agent() Agent {
@@ -431,3 +542,69 @@ func (c *invocationContext) EndInvocation() {
 func (c *invocationContext) Ended() bool {
 	return c.endInvocation
 }
+
+func (c *invocationContext) WithContext(ctx context.Context) InvocationContext {
+	newCtx := *c
+	newCtx.Context = ctx
+	return &newCtx
+}
+
+func (c *invocationContext) TranscriptionCache() []TranscriptionEntry {
+	return c.transcriptionCache
+}
+
+func (c *invocationContext) LiveSessionResumptionHandle() string {
+	return c.liveSessionResumptionHandle
+}
+
+func (c *invocationContext) InputRealtimeCache() []RealtimeCacheEntry {
+	return c.inputRealtimeCache
+}
+
+func (c *invocationContext) OutputRealtimeCache() []RealtimeCacheEntry {
+	return c.outputRealtimeCache
+}
+
+func (c *invocationContext) ResumabilityConfig() *ResumabilityConfig {
+	return c.resumabilityConfig
+}
+
+func (c *invocationContext) AppendInputRealtimeCache(entry RealtimeCacheEntry) {
+	c.inputRealtimeCache = append(c.inputRealtimeCache, entry)
+}
+
+func (c *invocationContext) AppendOutputRealtimeCache(entry RealtimeCacheEntry) {
+	c.outputRealtimeCache = append(c.outputRealtimeCache, entry)
+}
+
+func (c *invocationContext) ClearInputRealtimeCache() {
+	c.inputRealtimeCache = nil
+}
+
+func (c *invocationContext) ClearOutputRealtimeCache() {
+	c.outputRealtimeCache = nil
+}
+
+func (c *invocationContext) SetLiveSessionResumptionHandle(handle string) {
+	c.liveSessionResumptionHandle = handle
+}
+
+func (c *invocationContext) LiveRequestQueue() *LiveRequestQueue {
+	return c.liveRequestQueue
+}
+
+func pluginManagerFromContext(ctx context.Context) pluginManager {
+	a := ctx.Value(plugincontext.PluginManagerCtxKey)
+	m, ok := a.(pluginManager)
+	if !ok {
+		return nil
+	}
+	return m
+}
+
+type pluginManager interface {
+	RunBeforeAgentCallback(cctx CallbackContext) (*genai.Content, error)
+	RunAfterAgentCallback(cctx CallbackContext) (*genai.Content, error)
+}
+
+var _ InvocationContext = (*invocationContext)(nil)

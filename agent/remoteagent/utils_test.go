@@ -21,12 +21,13 @@ import (
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/server/adka2a"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 func newTestInvocationContext(t *testing.T, agentName string, events ...*session.Event) agent.InvocationContext {
@@ -60,7 +61,7 @@ func newEventFromParts(author string, parts ...*genai.Part) *session.Event {
 	if author == "user" {
 		role = genai.RoleUser
 	}
-	event := &session.Event{Author: author}
+	event := &session.Event{Author: author, Actions: session.EventActions{StateDelta: map[string]any{}, ArtifactDelta: map[string]int64{}}}
 	if len(parts) > 0 {
 		event.Content = genai.NewContentFromParts(parts, role)
 	}
@@ -224,7 +225,7 @@ func TestToMissingRemoteSessionParts(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			ictx := newTestInvocationContext(t, remoteName, tc.events...)
-			gotParts, gotContextID := toMissingRemoteSessionParts(ictx, ictx.Session().Events())
+			gotParts, gotContextID := toMissingRemoteSessionParts(ictx, ictx.Session().Events(), A2AConfig{})
 			if tc.wantContextID != gotContextID {
 				t.Errorf("toMissingRemoteSessionParts() contextID = %s, want %s", gotContextID, tc.wantContextID)
 			}
@@ -303,7 +304,6 @@ func TestPresentAsUserMessage(t *testing.T) {
 		cmpopts.IgnoreFields(session.Event{}, "ID"),
 		cmpopts.IgnoreFields(session.Event{}, "InvocationID"),
 		cmpopts.IgnoreFields(session.Event{}, "Timestamp"),
-		cmpopts.IgnoreFields(session.EventActions{}, "StateDelta"),
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {

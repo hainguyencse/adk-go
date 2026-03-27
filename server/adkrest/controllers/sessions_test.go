@@ -27,6 +27,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/gorilla/mux"
+
 	"google.golang.org/adk/server/adkrest/controllers"
 	"google.golang.org/adk/server/adkrest/internal/fakes"
 	"google.golang.org/adk/server/adkrest/internal/models"
@@ -190,16 +191,14 @@ func TestCreateSession(t *testing.T) {
 				Events: []models.Event{
 					{
 						ID:     "eventID",
-						Time:   time.Now().Add(5 * time.Minute).Unix(),
 						Author: "testUser",
 					},
 				},
 			},
 			wantSession: models.Session{
-				ID:        "testSession",
-				AppName:   "testApp",
-				UserID:    "testUser",
-				UpdatedAt: time.Now().Add(5 * time.Minute).Unix(),
+				ID:      "testSession",
+				AppName: "testApp",
+				UserID:  "testUser",
 				State: map[string]any{
 					"foo": "bar",
 				},
@@ -207,7 +206,6 @@ func TestCreateSession(t *testing.T) {
 					{
 						ID:     "eventID",
 						Author: "testUser",
-						Time:   time.Now().Add(5 * time.Minute).Unix(),
 					},
 				},
 			},
@@ -259,7 +257,8 @@ func TestCreateSession(t *testing.T) {
 			if err != nil {
 				t.Fatalf("decode response: %v", err)
 			}
-			if diff := cmp.Diff(tt.wantSession, gotSession, EquateApproxInt(int64(time.Second))); diff != "" {
+			if diff := cmp.Diff(tt.wantSession, gotSession, EquateApproxInt(int64(time.Second)),
+				cmpopts.IgnoreFields(models.Session{}, "UpdatedAt")); diff != "" {
 				t.Errorf("CreateSession() mismatch (-want +got):\n%s", diff)
 			}
 		})
@@ -433,7 +432,6 @@ func TestListSessions(t *testing.T) {
 			}
 		})
 	}
-
 }
 
 func sessionVars(sessionID fakes.SessionKey) map[string]string {

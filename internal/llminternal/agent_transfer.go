@@ -17,16 +17,20 @@ package llminternal
 import (
 	"bytes"
 	"fmt"
-	"html/template"
+	"iter"
 	"slices"
+	"strings"
+
+	"github.com/google/safehtml/template"
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/agent/parentmap"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
-	"google.golang.org/genai"
 )
 
 // From src/google/adk/flows/llm_flows/auto_flow.py
@@ -61,29 +65,35 @@ import (
 //
 // TODO: implement it in the runners package and update this doc.
 
-func AgentTransferRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest) error {
-	// TODO: support agent types other than LLMAgent, that have parent/subagents?
-	agent := ctx.Agent()
-	if !shouldUseAutoFlow(agent) {
-		return nil
-	}
+func AgentTransferRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		// TODO: support agent types other than LLMAgent, that have parent/subagents?
+		agent := ctx.Agent()
+		if !shouldUseAutoFlow(agent) {
+			return
+		}
 
-	parents := parentmap.FromContext(ctx)
+		parents := parentmap.FromContext(ctx)
 
-	targets := transferTargets(agent, parents[agent.Name()])
-	if len(targets) == 0 {
-		return nil
-	}
+		targets := transferTargets(agent, parents[agent.Name()])
+		if len(targets) == 0 {
+			return
+		}
 
-	// TODO(hyangah): why do we set this up in request processor
-	// instead of registering this as a normal function tool of the Agent?
-	transferToAgentTool := &TransferToAgentTool{}
-	si, err := instructionsForTransferToAgent(agent, parents[agent.Name()], targets, transferToAgentTool)
-	if err != nil {
-		return err
+		// TODO(hyangah): why do we set this up in request processor
+		// instead of registering this as a normal function tool of the Agent?
+		transferToAgentTool := &TransferToAgentTool{}
+		si, err := instructionsForTransferToAgent(agent, parents[agent.Name()], targets, transferToAgentTool)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		utils.AppendInstructions(req, si)
+		err = appendTools(req, transferToAgentTool)
+		if err != nil {
+			yield(nil, err)
+		}
 	}
-	utils.AppendInstructions(req, si)
-	return appendTools(req, transferToAgentTool)
 }
 
 type TransferToAgentTool struct{}
@@ -251,38 +261,57 @@ func instructionsForTransferToAgent(curAgent, parent agent.Agent, targets []agen
 
 	var buf bytes.Buffer
 	if err := transferToAgentPromptTmpl.Execute(&buf, struct {
-		AgentName string
-		Parent    agent.Agent
-		Targets   []agent.Agent
-		ToolName  string
+		AgentName        string
+		Parent           agent.Agent
+		Targets          []agent.Agent
+		ToolName         string
+		FormattedTargets string
 	}{
-		AgentName: curAgent.Name(),
-		Parent:    parent,
-		Targets:   targets,
-		ToolName:  transferTool.Name(),
+		AgentName:        curAgent.Name(),
+		Parent:           parent,
+		Targets:          targets,
+		ToolName:         transferTool.Name(),
+		FormattedTargets: formatTargets(targets),
 	}); err != nil {
 		return "", err
 	}
 	return buf.String(), nil
 }
 
+func formatTargets(targets []agent.Agent) string {
+	availableAgentNames := make([]string, len(targets))
+	for i, t := range targets {
+		availableAgentNames[i] = t.Name()
+	}
+	slices.Sort(availableAgentNames)
+	formattedAgentNames := make([]string, len(availableAgentNames))
+	for i, name := range availableAgentNames {
+		formattedAgentNames[i] = fmt.Sprintf("`%s`", name)
+	}
+	return strings.Join(formattedAgentNames, ", ")
+}
+
 // Prompt source:
 //  flows/llm_flows/agent_transfer.py _build_target_agents_instructions.
 
-const agentTransferInstructionTemplate = `You have a list of other agents to transfer to:
+const agentTransferInstructionTemplate = `
+You have a list of other agents to transfer to:
+
 {{range .Targets}}
 Agent name: {{.Name}}
 Agent description: {{.Description}}
+
 {{end}}
-If you are the best to answer the question according to your description, you
-can answer it.
+If you are the best to answer the question according to your description,
+you can answer it.
+
 If another agent is better for answering the question according to its
-description, call '{{.ToolName}}' function to transfer the
-question to that agent. When transfering, do not generate any text other than
-the function call.
+description, call ` + "`" + `{{.ToolName}}` + "`" + ` function to transfer the question to that
+agent. When transferring, do not generate any text other than the function
+call.
+
+**NOTE**: the only available agents for ` + "`" + `{{.ToolName}}` + "`" + ` function are
+{{.FormattedTargets}}.
 {{if .Parent}}
-Your parent agent is {{.Parent.Name}}. If neither the other agents nor
-you are best for answering the question according to the descriptions, transfer
-to your parent agent. If you don't have parent agent, try answer by yourself.
-{{end}}
-`
+If neither you nor the other agents are best for the question, transfer to your parent agent {{.Parent.Name}}.
+{{end}}`

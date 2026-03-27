@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package demonstrates a workaround for using Google Search tool with other tools.
 package main
 
 import (
@@ -20,16 +21,18 @@ import (
 	"os"
 	"strings"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/full"
 	"google.golang.org/adk/model/gemini"
+	"google.golang.org/adk/telemetry"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/agenttool"
 	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/adk/tool/geminitool"
-	"google.golang.org/genai"
 )
 
 // Package main demonstrates a workaround for using multiple tool types (e.g.,
@@ -106,6 +109,9 @@ func main() {
 
 	config := &launcher.Config{
 		AgentLoader: agent.NewSingleLoader(a),
+		TelemetryOptions: []telemetry.Option{
+			telemetry.WithGenAICaptureMessageContent(true),
+		},
 	}
 
 	l := full.NewLauncher()

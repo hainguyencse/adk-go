@@ -23,8 +23,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"google.golang.org/adk/session"
 	"gorm.io/gorm"
+
+	"google.golang.org/adk/session"
 )
 
 // databaseService is an database implementation of sessionService.Service.
@@ -217,7 +218,7 @@ func (s *databaseService) Get(ctx context.Context, req *session.GetRequest) (*se
 	}, nil
 }
 
-// List retrieves sessions from the database using its appName and optional UserId
+// List retrieves sessions from the database using its appName and optional UserID
 func (s *databaseService) List(ctx context.Context, req *session.ListRequest) (*session.ListResponse, error) {
 	appName, userID := req.AppName, req.UserID
 	if appName == "" {
@@ -327,22 +328,29 @@ func (s *databaseService) AppendEvent(ctx context.Context, curSession session.Se
 		return nil
 	}
 
-	// Trim temp state before persisting
-	event = trimTempDeltaState(event)
+	// Truncate timestamp to microsecond precision to match database precision and prevent rounding errors.
+	event.Timestamp = event.Timestamp.Truncate(time.Microsecond)
 
 	sess, ok := curSession.(*localSession)
 	if !ok {
 		return fmt.Errorf("unexpected session type %T", sess)
 	}
+	// append it to session
+	if err := sess.appendEvent(event); err != nil {
+		return err
+	}
 
+	// Trim temp state before persisting
+	event = trimTempDeltaState(event)
 	// applyChanges and persist them
 	err := s.applyEvent(ctx, sess, event)
 	if err != nil {
 		return err
 	}
 
-	// append it to session
-	return sess.appendEvent(event)
+	// update local session last update time
+	sess.updatedAt = event.Timestamp
+	return nil
 }
 
 // applyEvent fetches the session, validates it, applies state changes from an
@@ -362,9 +370,9 @@ func (s *databaseService) applyEvent(ctx context.Context, session *localSession,
 		}
 
 		// Ensure the session object is not stale.
-		// We use UnixNano() for microsecond-level precision, matching the Python code.
-		storageUpdateTime := storageSess.UpdateTime.UnixNano()
-		sessionUpdateTime := session.updatedAt.UnixNano()
+		// We use UnixMicro() for microsecond-level precision, matching the Python code.
+		storageUpdateTime := storageSess.UpdateTime.UnixMicro()
+		sessionUpdateTime := session.updatedAt.UnixMicro()
 		if storageUpdateTime > sessionUpdateTime {
 			return fmt.Errorf(
 				"stale session error: last update time from request (%s) is older than in database (%s)",
@@ -439,7 +447,7 @@ func fetchStorageAppState(tx *gorm.DB, appName string) (*storageAppState, error)
 	return &storageApp, nil
 }
 
-func fetchStorageUserState(tx *gorm.DB, appName string, userID string) (*storageUserState, error) {
+func fetchStorageUserState(tx *gorm.DB, appName, userID string) (*storageUserState, error) {
 	var storageUser storageUserState
 	if err := tx.First(&storageUser, "app_name = ? AND user_id = ?", appName, userID).Error; err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -471,14 +479,15 @@ func fetchAllAppStorageUserState(tx *gorm.DB, appName string) (map[string]*stora
 // for app, user, and session states based on key prefixes.
 // Temporary keys (starting with TempStatePrefix) are ignored.
 func extractStateDeltas(delta map[string]any) (
-	appStateDelta, userStateDelta, sessionStateDelta map[string]any) {
+	appStateDelta, userStateDelta, sessionStateDelta map[string]any,
+) {
 	// Initialize the maps to be returned.
 	appStateDelta = make(map[string]any)
 	userStateDelta = make(map[string]any)
 	sessionStateDelta = make(map[string]any)
 
 	if delta == nil {
-		return
+		return appStateDelta, userStateDelta, sessionStateDelta
 	}
 
 	for key, value := range delta {
@@ -491,7 +500,7 @@ func extractStateDeltas(delta map[string]any) (
 			sessionStateDelta[key] = value
 		}
 	}
-	return
+	return appStateDelta, userStateDelta, sessionStateDelta
 }
 
 // mergeStates combines app, user, and session state maps into a single map

@@ -22,6 +22,8 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/agent/workflowagents/loopagent"
@@ -30,8 +32,6 @@ import (
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
-
-	"google.golang.org/genai"
 )
 
 func TestNewLoopAgent(t *testing.T) {
@@ -63,6 +63,7 @@ func TestNewLoopAgent(t *testing.T) {
 							Role: genai.RoleModel,
 						},
 					},
+					Actions: session.EventActions{},
 				},
 			},
 		},
@@ -83,6 +84,7 @@ func TestNewLoopAgent(t *testing.T) {
 							Role: genai.RoleModel,
 						},
 					},
+					Actions: session.EventActions{},
 				},
 			},
 		},
@@ -103,6 +105,7 @@ func TestNewLoopAgent(t *testing.T) {
 							Role: genai.RoleModel,
 						},
 					},
+					Actions: session.EventActions{},
 				},
 				{
 					Author: "custom_agent_1",
@@ -114,6 +117,7 @@ func TestNewLoopAgent(t *testing.T) {
 							Role: genai.RoleModel,
 						},
 					},
+					Actions: session.EventActions{},
 				},
 			},
 		},
@@ -129,6 +133,10 @@ func TestNewLoopAgent(t *testing.T) {
 					LLMResponse: model.LLMResponse{
 						Content: genai.NewContentFromFunctionCall("exampleFunction", make(map[string]any), genai.RoleModel),
 					},
+					Actions: session.EventActions{
+						StateDelta:    map[string]any{},
+						ArtifactDelta: map[string]int64{},
+					},
 				},
 				{
 					Author: "custom_agent_0",
@@ -136,7 +144,9 @@ func TestNewLoopAgent(t *testing.T) {
 						Content: genai.NewContentFromFunctionResponse("exampleFunction", make(map[string]any), genai.RoleUser),
 					},
 					Actions: session.EventActions{
-						Escalate: true,
+						Escalate:      true,
+						StateDelta:    map[string]any{},
+						ArtifactDelta: map[string]int64{},
 					},
 				},
 				{
@@ -148,6 +158,10 @@ func TestNewLoopAgent(t *testing.T) {
 							},
 							Role: genai.RoleModel,
 						},
+					},
+					Actions: session.EventActions{
+						StateDelta:    map[string]any{},
+						ArtifactDelta: map[string]int64{},
 					},
 				},
 			},
@@ -164,6 +178,10 @@ func TestNewLoopAgent(t *testing.T) {
 					LLMResponse: model.LLMResponse{
 						Content: genai.NewContentFromFunctionCall("exampleFunction", make(map[string]any), genai.RoleModel),
 					},
+					Actions: session.EventActions{
+						StateDelta:    map[string]any{},
+						ArtifactDelta: map[string]int64{},
+					},
 				},
 				{
 					Author: "custom_agent_0",
@@ -173,6 +191,8 @@ func TestNewLoopAgent(t *testing.T) {
 					Actions: session.EventActions{
 						Escalate:          true,
 						SkipSummarization: true,
+						StateDelta:        map[string]any{},
+						ArtifactDelta:     map[string]int64{},
 					},
 				},
 			},
@@ -180,7 +200,6 @@ func TestNewLoopAgent(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-
 			ctx := t.Context()
 
 			loopAgent, err := loopagent.New(loopagent.Config{
@@ -235,7 +254,6 @@ func TestNewLoopAgent(t *testing.T) {
 
 			ignoreFields := []cmp.Option{
 				cmpopts.IgnoreFields(session.Event{}, "ID", "InvocationID", "Timestamp"),
-				cmpopts.IgnoreFields(session.EventActions{}, "StateDelta"),
 				cmpopts.IgnoreFields(genai.FunctionCall{}, "ID"),
 				cmpopts.IgnoreFields(genai.FunctionResponse{}, "ID"),
 			}
@@ -337,6 +355,10 @@ type FakeLLM struct {
 
 func (f *FakeLLM) Name() string {
 	return "fake-llm"
+}
+
+func (f *FakeLLM) Connect(ctx context.Context, req *model.LLMRequest) (model.LiveConnection, error) {
+	return nil, nil
 }
 
 func (f *FakeLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {

@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	icontext "google.golang.org/adk/internal/context"
@@ -29,7 +31,6 @@ import (
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 type testModel struct {
@@ -155,14 +156,14 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 				{
 					Parts: []*genai.Part{
 						{Text: "For context:"},
-						{Text: `[anotherAgent] called tool "func1" with parameters: null`},
+						{Text: "[anotherAgent] called tool `func1` with parameters: null"},
 					},
 					Role: "user",
 				},
 				{
 					Parts: []*genai.Part{
 						{Text: "For context:"},
-						{Text: `[anotherAgent] "func1" tool returned result: null`},
+						{Text: "[anotherAgent] `func1` tool returned result: null"},
 					},
 					Role: "user",
 				},
@@ -229,8 +230,13 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 			})
 
 			req := &model.LLMRequest{}
-			if err := llminternal.ContentsRequestProcessor(ctx, req); err != nil {
-				t.Fatalf("contentsRequestProcessor failed: %v", err)
+			for ev, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+				if ev != nil {
+					t.Fatal("ContentsRequestProcessor generated an unexpected event")
+				}
+				if err != nil {
+					t.Fatalf("contentRequestProcessor failed: %v", err)
+				}
 			}
 			got := req.Contents
 			if diff := cmp.Diff(tc.want, got); diff != "" {
@@ -334,10 +340,18 @@ func TestContentsRequestProcessor(t *testing.T) {
 						Content: genai.NewContentFromText("In branch 2", "user"),
 					},
 				},
+				{
+					Author: "user",
+					Branch: "",
+					LLMResponse: model.LLMResponse{
+						Content: genai.NewContentFromText("empty branch", "user"),
+					},
+				},
 			},
 			want: []*genai.Content{
 				genai.NewContentFromText("In branch 1", "user"),
 				genai.NewContentFromText("In branch 1 and task 1", "user"),
+				genai.NewContentFromText("empty branch", "user"),
 			},
 		},
 		{
@@ -382,8 +396,13 @@ func TestContentsRequestProcessor(t *testing.T) {
 			})
 
 			req := &model.LLMRequest{}
-			if err := llminternal.ContentsRequestProcessor(ctx, req); err != nil {
-				t.Fatalf("contentRequestProcessor failed: %v", err)
+			for ev, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+				if ev != nil {
+					t.Fatal("ContentsRequestProcessor generated an unexpected event")
+				}
+				if err != nil {
+					t.Fatalf("contentRequestProcessor failed: %v", err)
+				}
 			}
 			got := req.Contents
 			if diff := cmp.Diff(tc.want, got); diff != "" {
@@ -449,7 +468,7 @@ func TestConvertForeignEvent(t *testing.T) {
 						Role: "user",
 						Parts: []*genai.Part{
 							{Text: "For context:"},
-							{Text: `[foreign] called tool "test" with parameters: {"a":"b"}`},
+							{Text: "[foreign] called tool `test` with parameters: {\"a\":\"b\"}"},
 						},
 					},
 				},
@@ -479,7 +498,7 @@ func TestConvertForeignEvent(t *testing.T) {
 						Role: "user",
 						Parts: []*genai.Part{
 							{Text: "For context:"},
-							{Text: `[foreign] "test" tool returned result: {"c":"d"}`},
+							{Text: "[foreign] `test` tool returned result: {\"c\":\"d\"}"},
 						},
 					},
 				},
@@ -508,8 +527,14 @@ func TestContentsRequestProcessor_NonLLMAgent(t *testing.T) {
 	})
 
 	req := &model.LLMRequest{}
-	if err := llminternal.ContentsRequestProcessor(ctx, req); err != nil {
-		t.Fatalf("contentRequestProcessor failed: %v", err)
+
+	for ev, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+		if ev != nil {
+			t.Fatal("ContentsRequestProcessor generated an unexpected event")
+		}
+		if err != nil {
+			t.Fatalf("contentRequestProcessor failed: %v", err)
+		}
 	}
 	got := req
 	want := &model.LLMRequest{}
@@ -703,16 +728,22 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 			name: "Rearrangement with mixed LRO and normal calls",
 			events: []*session.Event{
 				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Analyze data and search for info", "user")}},
-				{Author: agentName,
-					LLMResponse: model.LLMResponse{Content: &genai.Content{
-						Role:  "model",
-						Parts: []*genai.Part{{FunctionCall: fcLROMixed}, {FunctionCall: fcNormalMixed}}},
+				{
+					Author: agentName,
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role:  "model",
+							Parts: []*genai.Part{{FunctionCall: fcLROMixed}, {FunctionCall: fcNormalMixed}},
+						},
 					},
 				},
-				{Author: "user",
-					LLMResponse: model.LLMResponse{Content: &genai.Content{
-						Role:  "user",
-						Parts: []*genai.Part{{FunctionResponse: frLROInterMixed}, {FunctionResponse: frNormalMixed}}},
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role:  "user",
+							Parts: []*genai.Part{{FunctionResponse: frLROInterMixed}, {FunctionResponse: frNormalMixed}},
+						},
 					},
 				},
 				{Author: agentName, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Analysis in progress, search completed", "model")}},
@@ -748,16 +779,22 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 			name: "Mixed rearrangement in history (non-final event)",
 			events: []*session.Event{
 				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Analyze and search simultaneously", "user")}},
-				{Author: agentName,
-					LLMResponse: model.LLMResponse{Content: &genai.Content{
-						Role:  "model",
-						Parts: []*genai.Part{{FunctionCall: fcHistLROMixed}, {FunctionCall: fcHistNormalMixed}}},
+				{
+					Author: agentName,
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role:  "model",
+							Parts: []*genai.Part{{FunctionCall: fcHistLROMixed}, {FunctionCall: fcHistNormalMixed}},
+						},
 					},
 				},
-				{Author: "user",
-					LLMResponse: model.LLMResponse{Content: &genai.Content{
-						Role:  "user",
-						Parts: []*genai.Part{{FunctionResponse: frHistLROInterMixed}, {FunctionResponse: frHistNormalMixed}}},
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role:  "user",
+							Parts: []*genai.Part{{FunctionResponse: frHistLROInterMixed}, {FunctionResponse: frHistNormalMixed}},
+						},
 					},
 				},
 				{Author: agentName, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Analysis continuing, search done", "model")}},
@@ -778,23 +815,32 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 			name: "Rearrangement preserves mixed text parts",
 			events: []*session.Event{
 				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Before function call", "user")}},
-				{Author: agentName,
-					LLMResponse: model.LLMResponse{Content: &genai.Content{
-						Role:  "model",
-						Parts: []*genai.Part{{Text: "I'll process this for you"}, {FunctionCall: fcPreserve}}},
+				{
+					Author: agentName,
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role:  "model",
+							Parts: []*genai.Part{{Text: "I'll process this for you"}, {FunctionCall: fcPreserve}},
+						},
 					},
 				},
-				{Author: "user",
-					LLMResponse: model.LLMResponse{Content: &genai.Content{
-						Role:  "user",
-						Parts: []*genai.Part{{Text: "Intermediate prefix"}, {FunctionResponse: frPreserveInter}, {Text: "Processing..."}}},
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role:  "user",
+							Parts: []*genai.Part{{Text: "Intermediate prefix"}, {FunctionResponse: frPreserveInter}, {Text: "Processing..."}},
+						},
 					},
 				},
 				{Author: agentName, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Still working on it...", "model")}},
-				{Author: "user",
-					LLMResponse: model.LLMResponse{Content: &genai.Content{
-						Role:  "user",
-						Parts: []*genai.Part{{Text: "Final prefix"}, {FunctionResponse: frPreserveFinal}, {Text: "Final suffix"}}},
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role:  "user",
+							Parts: []*genai.Part{{Text: "Final prefix"}, {FunctionResponse: frPreserveFinal}, {Text: "Final suffix"}},
+						},
 					},
 				},
 			},
@@ -836,20 +882,23 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 			})
 
 			req := &model.LLMRequest{}
-			err := llminternal.ContentsRequestProcessor(ctx, req)
-
-			if tc.wantErr != "" {
-				if err == nil {
-					t.Fatal("ContentsRequestProcessor succeeded; expected an error")
+			for ev, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+				if ev != nil {
+					t.Fatal("ContentsRequestProcessor generated an unexpected event")
 				}
-				if !strings.Contains(err.Error(), tc.wantErr) {
-					t.Errorf("Expected error to contain %q, got: %v", tc.wantErr, err)
+				if tc.wantErr != "" {
+					if err == nil {
+						t.Fatal("ContentsRequestProcessor succeeded; expected an error")
+					}
+					if !strings.Contains(err.Error(), tc.wantErr) {
+						t.Errorf("Expected error to contain %q, got: %v", tc.wantErr, err)
+					}
+					return // Test is done
 				}
-				return // Test is done
-			}
 
-			if err != nil {
-				t.Fatalf("ContentsRequestProcessor failed: %v", err)
+				if err != nil {
+					t.Fatalf("ContentsRequestProcessor failed: %v", err)
+				}
 			}
 
 			got := req.Contents
@@ -918,5 +967,7 @@ func (s *fakeSession) At(i int) *session.Event {
 	return s.events[i]
 }
 
-var _ session.Session = (*fakeSession)(nil)
-var _ session.Events = (*fakeSession)(nil)
+var (
+	_ session.Session = (*fakeSession)(nil)
+	_ session.Events  = (*fakeSession)(nil)
+)
