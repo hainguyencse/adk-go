@@ -18,19 +18,23 @@
 package agenttool
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/internal/llminternal"
+	"google.golang.org/adk/internal/plugininternal/plugincontext"
 	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/plugin"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
@@ -167,14 +171,23 @@ func (t *agentTool) Run(toolCtx tool.Context, args any) (map[string]any, error) 
 
 	sessionService := session.InMemoryService()
 
-	r, err := runner.New(runner.Config{
+	runnerCfg := runner.Config{
 		AppName:        t.agent.Name(),
 		Agent:          t.agent,
 		SessionService: sessionService,
 		// TODO - use forwarding_artifact_service as in python.
 		ArtifactService: artifact.InMemoryService(),
 		MemoryService:   memory.InMemoryService(),
-	})
+	}
+
+	if pluginMgmt := pluginManagerFromContext(toolCtx); pluginMgmt != nil {
+		runnerCfg.PluginConfig = runner.PluginConfig{
+			Plugins:      pluginMgmt.Plugins(),
+			CloseTimeout: pluginMgmt.CloseTimeout(),
+		}
+	}
+
+	r, err := runner.New(runnerCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create runner")
 	}
@@ -253,4 +266,24 @@ func (t *agentTool) Run(toolCtx tool.Context, args any) (map[string]any, error) 
 // ProcessRequest adds the agent tool's function declaration to the LLM request.
 func (t *agentTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
 	return toolutils.PackTool(req, t)
+}
+
+func pluginManagerFromContext(ctx context.Context) pluginManager {
+	a := ctx.Value(plugincontext.PluginManagerCtxKey)
+	m, ok := a.(pluginManager)
+	if !ok {
+		return nil
+	}
+	return m
+}
+
+type pluginManager interface {
+	RunBeforeModelCallback(cctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error)
+	RunAfterModelCallback(cctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
+	RunOnModelErrorCallback(ctx agent.CallbackContext, llmRequest *model.LLMRequest, llmResponseError error) (*model.LLMResponse, error)
+	RunBeforeToolCallback(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error)
+	RunAfterToolCallback(ctx tool.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error)
+	RunOnToolErrorCallback(ctx tool.Context, t tool.Tool, args map[string]any, err error) (map[string]any, error)
+	Plugins() []*plugin.Plugin
+	CloseTimeout() time.Duration
 }
