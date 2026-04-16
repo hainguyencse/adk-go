@@ -283,6 +283,14 @@ func (pm *PluginManager) Close() error {
 	return nil
 }
 
+func (pm *PluginManager) Plugins() []*plugin.Plugin {
+	return pm.plugins
+}
+
+func (pm *PluginManager) CloseTimeout() time.Duration {
+	return pm.closeTimeout
+}
+
 func ToContext(ctx context.Context, cfg *PluginManager) context.Context {
 	return context.WithValue(ctx, plugincontext.PluginManagerCtxKey, cfg)
 }
