@@ -218,8 +218,12 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 			liveCh := make(chan liveResult, 1)
 			// Next Agent Name to Transfer
 			transferAgentCh := make(chan string, 1)
+			// Signals GoAway-initiated graceful close → reconnect with saved handle
+			reconnectCh := make(chan struct{}, 1)
 			// Use to wait receiver messages process done before transfer to next agent
 			receiverDone := make(chan struct{})
+
+			goAwayReceived := false
 
 			// Receiver
 			go func() {
@@ -236,6 +240,10 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 
 						if llmResponse.LiveSessionResumptionUpdate != nil {
 							ctx.SetLiveSessionResumptionHandle(llmResponse.LiveSessionResumptionUpdate.NewHandle)
+						}
+
+						if llmResponse.LiveGoAway != nil {
+							goAwayReceived = true
 						}
 
 						// TODO: Enable Resumability when disconnect suddendly
@@ -284,18 +292,21 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 
 					case err, ok := <-errs:
 						if !ok {
+							if goAwayReceived && ctx.LiveSessionResumptionHandle() != "" {
+								reconnectCh <- struct{}{}
+							}
 							return
 						}
 						if err != nil {
-							// TODO: task_completed fires → sequential agent breaks → yield returns false → sender returns
-							// "use of closed network connection" means closeSession() was called
-							// by the sender (e.g. after task_completed / agent transition).
-							// Treat it as a normal close, not a real error.
-							// Should check if this implement is best practise.
+							// After GoAway, any connection close is the expected server-initiated
+							// shutdown — reconnect transparently instead of surfacing an error.
+							if goAwayReceived && ctx.LiveSessionResumptionHandle() != "" {
+								reconnectCh <- struct{}{}
+								return
+							}
 							if errors.Is(err, net.ErrClosed) {
 								return
 							}
-
 							liveCh <- liveResult{err: err}
 							return
 						}
@@ -369,6 +380,12 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 					if req.LiveConnectConfig != nil {
 						req.LiveConnectConfig.SessionResumption = nil
 					}
+					break sendLoop
+
+				case <-reconnectCh:
+					log.Info(ctx, "Reconnect session")
+					closeSession()
+					<-receiverDone
 					break sendLoop
 
 				case liveReq, ok := <-liveRequestQueue.Chan():

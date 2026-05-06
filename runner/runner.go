@@ -398,6 +398,7 @@ func (r *Runner) newInvocationContextForLive(ctx context.Context, userID, sessio
 		RealtimeInputConfig:      cfg.RealtimeInputConfig,
 		ContextWindowCompression: cfg.ContextWindowCompression,
 		Proactivity:              cfg.Proactivity,
+		SessionResumption:        cfg.SessionResumption,
 	}
 
 	if cfg.ExplicitVADSignal {
@@ -405,18 +406,6 @@ func (r *Runner) newInvocationContextForLive(ctx context.Context, userID, sessio
 	}
 	if cfg.EnableAffectiveDialog {
 		liveConnectConfig.EnableAffectiveDialog = &cfg.EnableAffectiveDialog
-	}
-
-	// TODO: Should double check logic resumability
-	if r.resumabilityConfig != nil && r.resumabilityConfig.IsResumable {
-		if cfg.SessionResumption != nil {
-			liveConnectConfig.SessionResumption = cfg.SessionResumption
-		} else {
-			liveConnectConfig.SessionResumption = &genai.SessionResumptionConfig{
-				Handle:      fmt.Sprintf("%s_%s", sessionID, userID),
-				Transparent: true,
-			}
-		}
 	}
 
 	ctx = parentmap.ToContext(ctx, r.parents)
