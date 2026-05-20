@@ -284,11 +284,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 							// - Function Call output -> Function Response -> LLM
 							// - App can manually send Function Response -> LLM
 							if hasFunctionResponse(ev.Content) {
-								err = liveConn.SendContent(ev.Content)
-								if err != nil {
-									yield(nil, err)
-									return
-								}
+								ctx.LiveRequestQueue().SendContent(ev.Content)
 							}
 
 							if ev != nil && ev.Actions.TransferToAgent != "" {
