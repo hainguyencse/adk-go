@@ -278,6 +278,19 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 
 							liveCh <- liveResult{event: ev}
 
+							// Function Response must response to LLM via LiveRequestQueue
+							// Send back to queue to make sure correct order of events.
+							// For example:
+							// - Function Call output -> Function Response -> LLM
+							// - App can manually send Function Response -> LLM
+							if hasFunctionResponse(ev.Content) {
+								err = liveConn.SendContent(ev.Content)
+								if err != nil {
+									yield(nil, err)
+									return
+								}
+							}
+
 							if ev != nil && ev.Actions.TransferToAgent != "" {
 								transferAgentCh <- ev.Actions.TransferToAgent
 								return
@@ -326,6 +339,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 				case <-ctx.Done():
 					return
 
+					// LLM Event -> app: InputTranscription, OutputTranscription, FunctionCall, FunctionResponse
 				case result := <-liveCh:
 					if result.err != nil {
 						yield(nil, result.err)
@@ -335,17 +349,6 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 					if result.event != nil {
 						if !yield(result.event, nil) {
 							return
-						}
-
-						// Only send function responses back to the model (tool results).
-						// Do NOT send model content back - that would echo the model own
-						// audio/text response to Gemini and cause a 1007 Precondition error.
-						if hasFunctionResponse(result.event.Content) {
-							err = liveConn.SendContent(result.event.Content)
-							if err != nil {
-								yield(nil, err)
-								return
-							}
 						}
 					}
 
@@ -388,6 +391,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 					<-receiverDone
 					break sendLoop
 
+					// User Event -> LiveRequestQueue -> LLM
 				case liveReq, ok := <-liveRequestQueue.Chan():
 					if !ok || liveReq.Close {
 						return
