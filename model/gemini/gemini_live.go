@@ -152,6 +152,14 @@ func (c *liveConnection) SendRealtime(input *genai.LiveRealtimeInput) error {
 	return nil
 }
 
+func (c *liveConnection) SendToolResponse(input *genai.LiveToolResponseInput) error {
+	if input == nil {
+		return nil
+	}
+
+	return c.session.SendToolResponse(*input)
+}
+
 func (c *liveConnection) receive(ctx context.Context) (<-chan *genai.LiveServerMessage, <-chan error) {
 	out := make(chan *genai.LiveServerMessage, 100)
 	errChan := make(chan error, 1)
