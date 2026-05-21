@@ -89,6 +89,7 @@ type LiveConnection interface {
 	SendHistory(contents []*genai.Content) error
 	SendContent(content *genai.Content) error
 	SendRealtime(input *genai.LiveRealtimeInput) error
+	SendToolResponse(input *genai.LiveToolResponseInput) error
 	Receive(ctx context.Context) (<-chan *LLMResponse, <-chan error)
 	Close() error
 }
