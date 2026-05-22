@@ -221,6 +221,8 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 			transferAgentCh := make(chan string, 1)
 			// Signals GoAway-initiated graceful close → reconnect with saved handle
 			reconnectCh := make(chan struct{}, 1)
+			// Signals task_completed tool response → terminate RunLive permanently
+			taskCompletedCh := make(chan struct{}, 1)
 			// Use to wait receiver messages process done before transfer to next agent
 			receiverDone := make(chan struct{})
 
@@ -286,6 +288,11 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 							// - App can manually send Function Response -> LLM
 							if hasFunctionResponse(ev.Content) {
 								ctx.LiveRequestQueue().SendContent(ev.Content)
+							}
+
+							if hasTaskCompleted(ev.Content) {
+								taskCompletedCh <- struct{}{}
+								return
 							}
 
 							if ev != nil && ev.Actions.TransferToAgent != "" {
@@ -381,6 +388,11 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 						req.LiveConnectConfig.SessionResumption = nil
 					}
 					break sendLoop
+
+				case <-taskCompletedCh:
+					closeSession()
+					<-receiverDone
+					return
 
 				case <-reconnectCh:
 					log.Info(ctx, "Reconnect session")
@@ -900,6 +912,20 @@ func (f *Flow) postprocess(ctx agent.InvocationContext, req *model.LLMRequest, r
 		}
 	}
 	return nil
+}
+
+// hasTaskCompleted returns true if content contains a task_completed function response,
+// which signals the RunLive loop to terminate cleanly without reconnection.
+func hasTaskCompleted(content *genai.Content) bool {
+	if content == nil {
+		return false
+	}
+	for _, p := range content.Parts {
+		if p.FunctionResponse != nil && p.FunctionResponse.Name == "task_completed" {
+			return true
+		}
+	}
+	return false
 }
 
 // hasFunctionResponse returns true if the content contains at least one FunctionResponse part.
