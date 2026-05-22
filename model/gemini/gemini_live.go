@@ -19,8 +19,9 @@ import (
 	"fmt"
 	"strings"
 
-	"google.golang.org/adk/model"
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/model"
 )
 
 // Connect establishes a bidirectional streaming connection to the model.
@@ -150,14 +151,6 @@ func (c *liveConnection) SendRealtime(input *genai.LiveRealtimeInput) error {
 	}
 
 	return nil
-}
-
-func (c *liveConnection) SendToolResponse(input *genai.LiveToolResponseInput) error {
-	if input == nil {
-		return nil
-	}
-
-	return c.session.SendToolResponse(*input)
 }
 
 func (c *liveConnection) receive(ctx context.Context) (<-chan *genai.LiveServerMessage, <-chan error) {

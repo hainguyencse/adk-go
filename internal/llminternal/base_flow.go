@@ -437,29 +437,10 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 							}
 						}
 
-						// Send tool response to LLM
-						if isFuncResp {
-							fnEvent := session.NewEvent(ctx.InvocationID())
-							fnEvent.Author = "user"
-							fnEvent.Branch = ctx.Branch()
-							fnEvent.LLMResponse = model.LLMResponse{
-								Content: liveReq.Content,
-							}
-
-							err := liveConn.SendToolResponse(&genai.LiveSendToolResponseParameters{
-								FunctionResponses: fnEvent.FunctionResponses(),
-							})
-							if err != nil {
-								yield(nil, err)
-								return
-							}
-						} else {
-							// Send text to LLM
-							err := liveConn.SendContent(liveReq.Content)
-							if err != nil {
-								yield(nil, err)
-								return
-							}
+						err := liveConn.SendContent(liveReq.Content)
+						if err != nil {
+							yield(nil, err)
+							return
 						}
 					}
 				}
