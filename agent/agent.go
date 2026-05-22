@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"sync"
 
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/genai"
@@ -185,6 +186,8 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			userContent:   ctx.UserContent(),
 			runConfig:     ctx.RunConfig(),
 			endInvocation: ctx.Ended(),
+
+			toolCallCache: &invocationContextCache{},
 		}
 		event, err := runBeforeAgentCallbacks(ctx)
 		if event != nil || err != nil {
@@ -236,6 +239,7 @@ func (a *agent) RunLive(ctx InvocationContext) iter.Seq2[*session.Event, error] 
 			transcriptionCache:          ctx.TranscriptionCache(),
 			inputRealtimeCache:          ctx.InputRealtimeCache(),
 			outputRealtimeCache:         ctx.OutputRealtimeCache(),
+			toolCallCache:               &invocationContextCache{},
 		}
 		event, err := runBeforeAgentCallbacks(ctx)
 		if event != nil || err != nil {
@@ -481,6 +485,11 @@ func (c *callbackContextState) All() iter.Seq2[string, any] {
 	return c.ctx.invocationContext.Session().State().All()
 }
 
+type invocationContextCache struct {
+	mu    sync.RWMutex
+	cache map[string]map[string]any
+}
+
 type invocationContext struct {
 	context.Context
 
@@ -501,6 +510,8 @@ type invocationContext struct {
 	outputRealtimeCache         []RealtimeCacheEntry
 	resumabilityConfig          *ResumabilityConfig
 	liveSessionResumptionHandle string
+
+	toolCallCache *invocationContextCache
 }
 
 func (c *invocationContext) Agent() Agent {
@@ -591,6 +602,28 @@ func (c *invocationContext) SetLiveSessionResumptionHandle(handle string) {
 
 func (c *invocationContext) LiveRequestQueue() *LiveRequestQueue {
 	return c.liveRequestQueue
+}
+
+func (c *invocationContext) GetCachedToolCall(key string) (map[string]any, bool) {
+	if c.toolCallCache == nil {
+		return nil, false
+	}
+	c.toolCallCache.mu.RLock()
+	defer c.toolCallCache.mu.RUnlock()
+	result, ok := c.toolCallCache.cache[key]
+	return result, ok
+}
+
+func (c *invocationContext) SetCachedToolCall(key string, result map[string]any) {
+	if c.toolCallCache == nil {
+		return
+	}
+	c.toolCallCache.mu.Lock()
+	defer c.toolCallCache.mu.Unlock()
+	if c.toolCallCache.cache == nil {
+		c.toolCallCache.cache = make(map[string]map[string]any)
+	}
+	c.toolCallCache.cache[key] = result
 }
 
 func pluginManagerFromContext(ctx context.Context) pluginManager {

@@ -132,6 +132,13 @@ type InvocationContext interface {
 	LiveSessionResumptionHandle() string
 
 	SetLiveSessionResumptionHandle(string)
+
+	// GetCachedToolCall returns a cached tool result for the given key, and whether it was found.
+	// Used for deduplicating identical tool calls within a single invocation.
+	GetCachedToolCall(key string) (map[string]any, bool)
+
+	// SetCachedToolCall stores a tool result in the cache under the given key.
+	SetCachedToolCall(key string, result map[string]any)
 }
 
 // ReadonlyContext provides read-only access to invocation context data.
