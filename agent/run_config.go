@@ -72,4 +72,11 @@ type RunConfig struct {
 	SupportCFC bool
 	// Optional. If enabled, the model will detect emotions and adapt its responses accordingly.
 	EnableAffectiveDialog bool
+
+	// Whether to deduplicate identical tool calls (same tool name + same arguments) within a single invocation.
+	// This helps prevent redundant tool execution when the model repeats the same
+	// function call multiple times (for example, when a tool is slow or the model
+	// does not follow the instruction to call a tool only once).
+	// Note: Only the tool result is reused; tool side effects (state/artifact deltas) are only applied once from the first execution.
+	DedupeToolCalls bool
 }

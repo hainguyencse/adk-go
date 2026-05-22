@@ -68,6 +68,7 @@ type invocationState struct {
 	transcriptionCache          []agent.TranscriptionEntry
 	inputRealtimeCache          []agent.RealtimeCacheEntry
 	outputRealtimeCache         []agent.RealtimeCacheEntry
+	toolCallCache               map[string]map[string]any
 }
 
 type InvocationContext struct {
@@ -179,6 +180,25 @@ func (c *InvocationContext) ClearOutputRealtimeCache() {
 	c.state.mu.Lock()
 	defer c.state.mu.Unlock()
 	c.state.outputRealtimeCache = nil
+}
+
+func (c *InvocationContext) GetCachedToolCall(key string) (map[string]any, bool) {
+	c.state.mu.RLock()
+	defer c.state.mu.RUnlock()
+	if c.state.toolCallCache == nil {
+		return nil, false
+	}
+	result, ok := c.state.toolCallCache[key]
+	return result, ok
+}
+
+func (c *InvocationContext) SetCachedToolCall(key string, result map[string]any) {
+	c.state.mu.Lock()
+	defer c.state.mu.Unlock()
+	if c.state.toolCallCache == nil {
+		c.state.toolCallCache = make(map[string]map[string]any)
+	}
+	c.state.toolCallCache[key] = result
 }
 
 var _ agent.InvocationContext = (*InvocationContext)(nil)

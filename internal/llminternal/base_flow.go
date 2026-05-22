@@ -16,6 +16,7 @@ package llminternal
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"iter"
@@ -659,20 +660,31 @@ func (f *Flow) postprocessLive(ctx agent.InvocationContext, llmRequest *model.LL
 		stateDelta := make(map[string]any)
 		newResponseWithEventID := newResponseWithEventID(llmResponse)
 		newModelResponseEvent := f.finalizeModelResponseEvent(ctx, newResponseWithEventID, tools, stateDelta)
-		if !yield(newModelResponseEvent, nil) {
-			return
-		}
 
-		if len(newModelResponseEvent.FunctionCalls()) > 0 {
-			functionResponseEvent, err := f.handleFunctionCalls(ctx, tools, llmResponse, nil)
-			if err != nil {
-				yield(nil, err)
-				return
-			}
-			if functionResponseEvent != nil {
-				if !yield(functionResponseEvent, nil) {
+		hashFunctionCalls := len(newModelResponseEvent.FunctionCalls()) > 0
+		if hashFunctionCalls {
+			// If the tool call is not deduped, yield the function call and function response as usual.
+			if !dedupeToolCalls(ctx, newModelResponseEvent, tools) {
+				// Yield function call
+				if !yield(newModelResponseEvent, nil) {
 					return
 				}
+
+				// Yield function response
+				functionResponseEvent, err := f.handleFunctionCalls(ctx, tools, llmResponse, nil)
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+				if functionResponseEvent != nil {
+					if !yield(functionResponseEvent, nil) {
+						return
+					}
+				}
+			}
+		} else {
+			if !yield(newModelResponseEvent, nil) {
+				return
 			}
 		}
 	}
@@ -977,6 +989,44 @@ Suggested fixes:
   - Review agent instruction to ensure tool usage is clear
   - Verify tool is included in agent.tools list
   - Check for typos in function name`, toolName, joinedTools)
+}
+
+// toolCallCacheKey generates a stable cache key from branch, tool name, and args.
+// encoding/json marshals map[string]any keys in sorted order, giving a canonical representation.
+func toolCallCacheKey(branch, toolName string, args map[string]any) string {
+	argsJSON, _ := json.Marshal(args)
+	return fmt.Sprintf("%s\x00%s\x00%s", branch, toolName, argsJSON)
+}
+
+func dedupeToolCalls(ctx agent.InvocationContext, ev *session.Event, tools map[string]tool.Tool) bool {
+	dedupeEnabled := ctx.RunConfig() != nil && ctx.RunConfig().DedupeToolCalls
+
+	fnCalls := utils.FunctionCalls(ev.Content)
+	for _, fnCall := range fnCalls {
+		var curTool tool.Tool
+		var found bool
+		curTool, found = tools[fnCall.Name]
+		if !found {
+			return false
+		}
+
+		cacheKey := toolCallCacheKey(ctx.Branch(), fnCall.Name, fnCall.Args)
+		// Get cached -> isTriggered
+		_, isTriggered := ctx.GetCachedToolCall(cacheKey)
+
+		if isTriggered {
+			// Only check if dedupe is enabled or the tool is long-running
+			shouldDedupe := dedupeEnabled || curTool.IsLongRunning()
+			if shouldDedupe {
+				return true
+			}
+		}
+
+		// Set cached
+		ctx.SetCachedToolCall(cacheKey, map[string]any{"isTriggered": true})
+	}
+
+	return false
 }
 
 // handleFunctionCalls calls the functions and returns the function response event.
