@@ -226,7 +226,10 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 			// Live message send from receiver
 			liveCh := make(chan liveResult, 1)
 			// Next Agent Name to Transfer
-			transferAgentCh := make(chan string, 1)
+			type transferInfo struct {
+				agentName string
+			}
+			transferAgentCh := make(chan transferInfo, 1)
 			// Signals GoAway-initiated graceful close → reconnect with saved handle
 			reconnectCh := make(chan struct{}, 1)
 			// Signals task_completed tool response → terminate RunLive permanently
@@ -303,9 +306,13 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 								return
 							}
 
-							if ev != nil && ev.Actions.TransferToAgent != "" {
-								transferAgentCh <- ev.Actions.TransferToAgent
-								return
+							// Transfer to agent function response
+							if ev.Content != nil && ev.Content.Parts != nil && len(ev.Content.Parts) > 0 && ev.Content.Parts[0].FunctionResponse != nil && ev.Content.Parts[0].FunctionResponse.Name == "transfer_to_agent" {
+								if ev != nil && ev.Actions.TransferToAgent != "" {
+									info := transferInfo{agentName: ev.Actions.TransferToAgent}
+									transferAgentCh <- info
+									return
+								}
 							}
 						}
 
@@ -364,19 +371,40 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 						}
 					}
 
-				case agentName := <-transferAgentCh: // Transfer to next agent
+				case info := <-transferAgentCh: // Transfer to next agent
 					// Close current session and wait for goroutine to exit.
 					closeSession()
 					<-receiverDone
+
+					// The receiver sends the function response event to liveCh before
+					// signaling transferAgentCh. If select picked transferAgentCh first,
+					// that event is still buffered — drain it so it gets saved to the session.
+				drainLiveCh:
+					for {
+						select {
+						case result := <-liveCh:
+							if result.err != nil {
+								yield(nil, result.err)
+								return
+							}
+							if result.event != nil {
+								if !yield(result.event, nil) {
+									return
+								}
+							}
+						default:
+							break drainLiveCh
+						}
+					}
 
 					// Clear the resumption handle: the session it belonged to is now
 					// closed, and the next agent has different tools/instructions so
 					// it must start a fresh Gemini Live session.
 					ctx.SetLiveSessionResumptionHandle("")
 
-					nextAgent := f.agentToRun(ctx, agentName)
+					nextAgent := f.agentToRun(ctx, info.agentName)
 					if nextAgent == nil {
-						yield(nil, fmt.Errorf("failed to find agent: %s", agentName))
+						yield(nil, fmt.Errorf("failed to find agent: %s", info.agentName))
 						return
 					}
 
@@ -401,6 +429,26 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 				case <-taskCompletedCh:
 					closeSession()
 					<-receiverDone
+
+					// Drain any pending event (e.g., the task_completed function response)
+					// for the same reason as the transferAgentCh drain above.
+				drainLiveChTaskCompleted:
+					for {
+						select {
+						case result := <-liveCh:
+							if result.err != nil {
+								yield(nil, result.err)
+								return
+							}
+							if result.event != nil {
+								if !yield(result.event, nil) {
+									return
+								}
+							}
+						default:
+							break drainLiveChTaskCompleted
+						}
+					}
 					return
 
 				case <-reconnectCh:
