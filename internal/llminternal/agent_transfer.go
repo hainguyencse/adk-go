@@ -89,12 +89,48 @@ func AgentTransferRequestProcessor(ctx agent.InvocationContext, req *model.LLMRe
 			return
 		}
 		utils.AppendInstructions(req, si)
-		err = appendTools(req, transferToAgentTool)
+
+		tools := []tool.Tool{transferToAgentTool}
+		// Only sub-agents (those with a parent) get task_completed.
+		// The root agent must not call it — doing so would prematurely terminate the session.
+		if parents[agent.Name()] != nil {
+			tools = append(tools, &TaskCompletedTool{})
+		}
+		err = appendTools(req, tools...)
 		if err != nil {
 			yield(nil, err)
 		}
 	}
 }
+
+// TaskCompletedTool signals to the RunLive loop that the agent has finished its
+// task and the session should terminate cleanly without reconnection.
+type TaskCompletedTool struct{}
+
+func (t *TaskCompletedTool) Name() string { return "task_completed" }
+
+func (t *TaskCompletedTool) Description() string {
+	return "Call this when you have fully completed the user's request. This ends the session cleanly."
+}
+
+func (t *TaskCompletedTool) IsLongRunning() bool { return false }
+
+func (t *TaskCompletedTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{
+		Name:        t.Name(),
+		Description: t.Description(),
+	}
+}
+
+func (t *TaskCompletedTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
+	return appendTools(req, t)
+}
+
+func (t *TaskCompletedTool) Run(ctx tool.Context, args any) (map[string]any, error) {
+	return map[string]any{}, nil
+}
+
+var _ tool.Tool = (*TaskCompletedTool)(nil)
 
 type TransferToAgentTool struct{}
 

@@ -173,7 +173,15 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 
 		log.Info(ctx, "Flow.RunLive start", "agent", ctx.Agent().Name(), "branch", ctx.Branch())
 		attempt := 1
+		needsContentRefresh := false
 		for {
+			if needsContentRefresh && ctx.LiveSessionResumptionHandle() == "" {
+				if err := rebuildContents(ctx, req); err != nil {
+					yield(nil, err)
+					return
+				}
+			}
+			needsContentRefresh = false
 			// Handle resumption connection
 			if handle := ctx.LiveSessionResumptionHandle(); handle != "" {
 				log.Info(ctx, "Resuming live session", "handle", handle, "attempt", attempt)
@@ -218,9 +226,14 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 			// Live message send from receiver
 			liveCh := make(chan liveResult, 1)
 			// Next Agent Name to Transfer
-			transferAgentCh := make(chan string, 1)
+			type transferInfo struct {
+				agentName string
+			}
+			transferAgentCh := make(chan transferInfo, 1)
 			// Signals GoAway-initiated graceful close → reconnect with saved handle
 			reconnectCh := make(chan struct{}, 1)
+			// Signals task_completed tool response → terminate RunLive permanently
+			taskCompletedCh := make(chan struct{}, 1)
 			// Use to wait receiver messages process done before transfer to next agent
 			receiverDone := make(chan struct{})
 
@@ -284,13 +297,22 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 							// For example:
 							// - Function Call output -> Function Response -> LLM
 							// - App can manually send Function Response -> LLM
-							if hasFunctionResponse(ev.Content) {
+							if hasFunctionResponse(ev.Content) && !hasTaskCompleted(ev.Content) {
 								ctx.LiveRequestQueue().SendContent(ev.Content)
 							}
 
-							if ev != nil && ev.Actions.TransferToAgent != "" {
-								transferAgentCh <- ev.Actions.TransferToAgent
+							if hasTaskCompleted(ev.Content) {
+								taskCompletedCh <- struct{}{}
 								return
+							}
+
+							// Transfer to agent function response
+							if ev.Content != nil && ev.Content.Parts != nil && len(ev.Content.Parts) > 0 && ev.Content.Parts[0].FunctionResponse != nil && ev.Content.Parts[0].FunctionResponse.Name == "transfer_to_agent" {
+								if ev != nil && ev.Actions.TransferToAgent != "" {
+									info := transferInfo{agentName: ev.Actions.TransferToAgent}
+									transferAgentCh <- info
+									return
+								}
 							}
 						}
 
@@ -349,19 +371,40 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 						}
 					}
 
-				case agentName := <-transferAgentCh: // Transfer to next agent
+				case info := <-transferAgentCh: // Transfer to next agent
 					// Close current session and wait for goroutine to exit.
 					closeSession()
 					<-receiverDone
+
+					// The receiver sends the function response event to liveCh before
+					// signaling transferAgentCh. If select picked transferAgentCh first,
+					// that event is still buffered — drain it so it gets saved to the session.
+				drainLiveCh:
+					for {
+						select {
+						case result := <-liveCh:
+							if result.err != nil {
+								yield(nil, result.err)
+								return
+							}
+							if result.event != nil {
+								if !yield(result.event, nil) {
+									return
+								}
+							}
+						default:
+							break drainLiveCh
+						}
+					}
 
 					// Clear the resumption handle: the session it belonged to is now
 					// closed, and the next agent has different tools/instructions so
 					// it must start a fresh Gemini Live session.
 					ctx.SetLiveSessionResumptionHandle("")
 
-					nextAgent := f.agentToRun(ctx, agentName)
+					nextAgent := f.agentToRun(ctx, info.agentName)
 					if nextAgent == nil {
-						yield(nil, fmt.Errorf("failed to find agent: %s", agentName))
+						yield(nil, fmt.Errorf("failed to find agent: %s", info.agentName))
 						return
 					}
 
@@ -380,7 +423,33 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 					if req.LiveConnectConfig != nil {
 						req.LiveConnectConfig.SessionResumption = nil
 					}
+					needsContentRefresh = true
 					break sendLoop
+
+				case <-taskCompletedCh:
+					closeSession()
+					<-receiverDone
+
+					// Drain any pending event (e.g., the task_completed function response)
+					// for the same reason as the transferAgentCh drain above.
+				drainLiveChTaskCompleted:
+					for {
+						select {
+						case result := <-liveCh:
+							if result.err != nil {
+								yield(nil, result.err)
+								return
+							}
+							if result.event != nil {
+								if !yield(result.event, nil) {
+									return
+								}
+							}
+						default:
+							break drainLiveChTaskCompleted
+						}
+					}
+					return
 
 				case <-reconnectCh:
 					log.Info(ctx, "Reconnect session")
@@ -902,6 +971,20 @@ func (f *Flow) postprocess(ctx agent.InvocationContext, req *model.LLMRequest, r
 	return nil
 }
 
+// hasTaskCompleted returns true if content contains a task_completed function response,
+// which signals the RunLive loop to terminate cleanly without reconnection.
+func hasTaskCompleted(content *genai.Content) bool {
+	if content == nil {
+		return false
+	}
+	for _, p := range content.Parts {
+		if p.FunctionResponse != nil && p.FunctionResponse.Name == "task_completed" {
+			return true
+		}
+	}
+	return false
+}
+
 // hasFunctionResponse returns true if the content contains at least one FunctionResponse part.
 func hasFunctionResponse(content *genai.Content) bool {
 	if content == nil {
@@ -1319,6 +1402,31 @@ func (f *Flow) getAuthorForEvent(ctx agent.InvocationContext, llmResponse *model
 	}
 
 	return ctx.Agent().Name()
+}
+
+// rebuildContents rebuilds req.Contents from the current session events.
+// Called after a sub-agent returns so the parent resumes with full context.
+func rebuildContents(ctx agent.InvocationContext, req *model.LLMRequest) error {
+	llmAgent := asLLMAgent(ctx.Agent())
+	if llmAgent == nil {
+		return nil
+	}
+	fn := buildContentsDefault
+	if llmAgent.internal().IncludeContents == "none" {
+		fn = buildContentsCurrentTurnContextOnly
+	}
+	var events []*session.Event
+	if ctx.Session() != nil {
+		for e := range ctx.Session().Events().All() {
+			events = append(events, e)
+		}
+	}
+	contents, err := fn(ctx.Agent().Name(), ctx.Branch(), events)
+	if err != nil {
+		return err
+	}
+	req.Contents = contents
+	return nil
 }
 
 func deepMergeMap(dst, src map[string]any) map[string]any {
