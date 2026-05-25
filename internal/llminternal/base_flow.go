@@ -1066,7 +1066,7 @@ Suggested fixes:
 // encoding/json marshals map[string]any keys in sorted order, giving a canonical representation.
 func toolCallCacheKey(branch, toolName string, args map[string]any) string {
 	argsJSON, _ := json.Marshal(args)
-	return fmt.Sprintf("%s\x00%s\x00%s", branch, toolName, argsJSON)
+	return fmt.Sprintf("branch:%s:tool_name:%s:args:%s", branch, toolName, argsJSON)
 }
 
 // handleFunctionCalls calls the functions and returns the function response event.
