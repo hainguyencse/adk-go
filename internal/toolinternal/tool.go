@@ -35,14 +35,14 @@ type RequestProcessor interface {
 }
 
 type ToolResponseCacheService struct {
-	service   tool.ResponseCacheService
+	Service   tool.ResponseCacheService
 	AppName   string
 	UserID    string
 	SessionID string
 }
 
 func (svc ToolResponseCacheService) Get(ctx context.Context, key string) (map[string]any, bool) {
-	res, err := svc.service.Get(ctx, &tool.GetRequest{
+	res, err := svc.Service.Get(ctx, &tool.GetRequest{
 		AppName:   svc.AppName,
 		UserID:    svc.UserID,
 		SessionID: svc.SessionID,
@@ -56,7 +56,7 @@ func (svc ToolResponseCacheService) Get(ctx context.Context, key string) (map[st
 }
 
 func (svc ToolResponseCacheService) Set(ctx context.Context, key string, value map[string]any) {
-	_ = svc.service.Set(ctx, &tool.SetRequest{
+	_ = svc.Service.Set(ctx, &tool.SetRequest{
 		AppName:      svc.AppName,
 		UserID:       svc.UserID,
 		SessionID:    svc.SessionID,
@@ -66,7 +66,7 @@ func (svc ToolResponseCacheService) Set(ctx context.Context, key string, value m
 }
 
 func (svc ToolResponseCacheService) Invalidate(ctx context.Context, key string) {
-	_ = svc.service.Invalidate(ctx, &tool.InvalidateRequest{
+	_ = svc.Service.Invalidate(ctx, &tool.InvalidateRequest{
 		AppName:   svc.AppName,
 		UserID:    svc.UserID,
 		SessionID: svc.SessionID,
