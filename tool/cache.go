@@ -38,7 +38,7 @@ type InvalidateRequest struct {
 }
 
 type responseCacheKey struct {
-	appName, userID, sessionID string
+	appName, userID, sessionID, key string
 }
 
 type responseCacheValue map[string]any
@@ -67,6 +67,7 @@ func (svc *inMemoryResponseCacheService) Set(ctx context.Context, req *SetReques
 		appName:   req.AppName,
 		userID:    req.UserID,
 		sessionID: req.SessionID,
+		key:       req.Key,
 	}
 	svc.store[key] = req.ToolResponse
 	return nil
@@ -84,6 +85,7 @@ func (svc *inMemoryResponseCacheService) Get(ctx context.Context, req *GetReques
 		appName:   req.AppName,
 		userID:    req.UserID,
 		sessionID: req.SessionID,
+		key:       req.Key,
 	}
 	value, found := svc.store[key]
 	return &GetResponse{
@@ -104,6 +106,7 @@ func (svc *inMemoryResponseCacheService) Invalidate(ctx context.Context, req *In
 		appName:   req.AppName,
 		userID:    req.UserID,
 		sessionID: req.SessionID,
+		key:       req.Key,
 	}
 	delete(svc.store, key)
 

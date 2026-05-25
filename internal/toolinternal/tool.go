@@ -52,7 +52,7 @@ func (svc ToolResponseCacheService) Get(ctx context.Context, key string) (map[st
 		return nil, false
 	}
 
-	return res.ToolResponse, true
+	return res.ToolResponse, res.Found
 }
 
 func (svc ToolResponseCacheService) Set(ctx context.Context, key string, value map[string]any) {

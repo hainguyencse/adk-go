@@ -15,12 +15,14 @@
 package llminternal
 
 import (
+	"context"
 	"errors"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/agent"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/model"
@@ -29,8 +31,9 @@ import (
 )
 
 type mockFunctionTool struct {
-	name    string
-	runFunc func(tool.Context, map[string]any) (map[string]any, error)
+	name          string
+	isLongRunning bool
+	runFunc       func(tool.Context, map[string]any) (map[string]any, error)
 }
 
 func (m *mockFunctionTool) Name() string {
@@ -50,7 +53,7 @@ func (m *mockFunctionTool) OutputSchema() *genai.Schema {
 }
 
 func (m *mockFunctionTool) IsLongRunning() bool {
-	return false
+	return m.isLongRunning
 }
 
 func (m *mockFunctionTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
@@ -395,9 +398,129 @@ func TestCallTool(t *testing.T) {
 				OnToolErrorCallbacks: tc.onToolErrorCallbacks,
 			}
 			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
-			got := f.callTool(toolinternal.NewToolContext(ctx, "", nil, nil), tc.tool, tc.args)
+			got, _ := f.callTool(ctx, toolinternal.NewToolContext(ctx, "", nil, nil), tc.tool, tc.args)
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("callTool() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+type testToolResponseCache struct {
+	responses map[string]map[string]any
+	getKeys   []string
+	setKeys   []string
+}
+
+func (c *testToolResponseCache) Get(ctx context.Context, key string) (map[string]any, bool) {
+	c.getKeys = append(c.getKeys, key)
+	resp, ok := c.responses[key]
+	return resp, ok
+}
+
+func (c *testToolResponseCache) Set(ctx context.Context, key string, value map[string]any) {
+	if c.responses == nil {
+		c.responses = map[string]map[string]any{}
+	}
+	c.setKeys = append(c.setKeys, key)
+	c.responses[key] = value
+}
+
+func (c *testToolResponseCache) Invalidate(ctx context.Context, key string) {
+	delete(c.responses, key)
+}
+
+func TestCallToolDedup(t *testing.T) {
+	tests := []struct {
+		name          string
+		runConfig     *agent.RunConfig
+		isLongRunning bool
+		wantDedup     bool
+	}{
+		{
+			name:      "dedupe disabled",
+			runConfig: &agent.RunConfig{},
+		},
+		{
+			name: "dedupe enabled by run config",
+			runConfig: &agent.RunConfig{
+				DedupeToolCalls: true,
+			},
+			wantDedup: true,
+		},
+		{
+			name:          "dedupe enabled for long running tool",
+			isLongRunning: true,
+			wantDedup:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cache := &testToolResponseCache{}
+			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+				Branch:            "branch",
+				RunConfig:         tt.runConfig,
+				ToolResponseCache: cache,
+			})
+			args := map[string]any{"key": "value"}
+			callCount := 0
+			fnTool := &mockFunctionTool{
+				name:          "testTool",
+				isLongRunning: tt.isLongRunning,
+				runFunc: func(ctx tool.Context, args map[string]any) (map[string]any, error) {
+					callCount++
+					return map[string]any{"result": "success"}, nil
+				},
+			}
+			f := &Flow{}
+
+			first, firstHit := f.callTool(ctx, toolinternal.NewToolContext(ctx, "", nil, nil), fnTool, args)
+			second, secondHit := f.callTool(ctx, toolinternal.NewToolContext(ctx, "", nil, nil), fnTool, args)
+
+			want := map[string]any{"result": "success"}
+			if diff := cmp.Diff(want, first); diff != "" {
+				t.Errorf("first callTool() response mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(want, second); diff != "" {
+				t.Errorf("second callTool() response mismatch (-want +got):\n%s", diff)
+			}
+
+			if tt.wantDedup {
+				if firstHit {
+					t.Errorf("first callTool() cache hit = true, want false")
+				}
+				if !secondHit {
+					t.Errorf("second callTool() cache hit = false, want true")
+				}
+				if callCount != 1 {
+					t.Errorf("tool run count = %d, want 1", callCount)
+				}
+
+				wantCacheKey := toolCallCacheKey("branch", "testTool", args)
+				if diff := cmp.Diff([]string{wantCacheKey, wantCacheKey}, cache.getKeys); diff != "" {
+					t.Errorf("cache get keys mismatch (-want +got):\n%s", diff)
+				}
+				if diff := cmp.Diff(want, cache.responses[wantCacheKey]); diff != "" {
+					t.Errorf("cached response mismatch (-want +got):\n%s", diff)
+				}
+				return
+			}
+
+			if firstHit {
+				t.Errorf("first callTool() cache hit = true, want false")
+			}
+			if secondHit {
+				t.Errorf("second callTool() cache hit = true, want false")
+			}
+			if callCount != 2 {
+				t.Errorf("tool run count = %d, want 2", callCount)
+			}
+			if len(cache.getKeys) != 0 {
+				t.Errorf("cache get keys = %v, want empty", cache.getKeys)
+			}
+			if len(cache.setKeys) != 0 {
+				t.Errorf("cache set keys = %v, want empty", cache.setKeys)
 			}
 		})
 	}

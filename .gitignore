@@ -22,3 +22,6 @@ go.work
 go.work.sum
 eval_results/
 *.DS_Store
+
+vendor
+go.sum
