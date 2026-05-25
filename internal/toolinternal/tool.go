@@ -12,10 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package tool defines internal-only interfaces and logic for tools.
+// Package toolinternal defines internal-only interfaces and logic for tools.
 package toolinternal
 
 import (
+	"context"
+
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/model"
@@ -30,4 +32,44 @@ type FunctionTool interface {
 
 type RequestProcessor interface {
 	ProcessRequest(ctx tool.Context, req *model.LLMRequest) error
+}
+
+type ToolResponseCacheService struct {
+	service   tool.ResponseCacheService
+	AppName   string
+	UserID    string
+	SessionID string
+}
+
+func (svc ToolResponseCacheService) Get(ctx context.Context, key string) (map[string]any, bool) {
+	res, err := svc.service.Get(ctx, &tool.GetRequest{
+		AppName:   svc.AppName,
+		UserID:    svc.UserID,
+		SessionID: svc.SessionID,
+		Key:       key,
+	})
+	if err != nil {
+		return nil, false
+	}
+
+	return res.ToolResponse, true
+}
+
+func (svc ToolResponseCacheService) Set(ctx context.Context, key string, value map[string]any) {
+	_ = svc.service.Set(ctx, &tool.SetRequest{
+		AppName:      svc.AppName,
+		UserID:       svc.UserID,
+		SessionID:    svc.SessionID,
+		Key:          key,
+		ToolResponse: value,
+	})
+}
+
+func (svc ToolResponseCacheService) Invalidate(ctx context.Context, key string) {
+	_ = svc.service.Invalidate(ctx, &tool.InvalidateRequest{
+		AppName:   svc.AppName,
+		UserID:    svc.UserID,
+		SessionID: svc.SessionID,
+		Key:       key,
+	})
 }

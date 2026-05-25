@@ -1243,11 +1243,11 @@ func (f *Flow) callTool(invocationCtx agent.InvocationContext, toolCtx tool.Cont
 
 		defer func() {
 			if funcResp != nil {
-				invocationCtx.SetCachedToolCall(cacheKey, funcResp)
+				invocationCtx.SetCachedToolResponse(toolCtx, cacheKey, funcResp)
 			}
 		}()
 
-		funcResp, hit = invocationCtx.GetCachedToolCall(cacheKey)
+		funcResp, hit = invocationCtx.GetCachedToolResponse(toolCtx, cacheKey)
 		if hit {
 			return
 		}

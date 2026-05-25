@@ -52,6 +52,8 @@ type Config struct {
 	ArtifactService artifact.Service
 	// optional
 	MemoryService memory.Service
+	// optional
+	ToolResponseCache agent.ToolResponseCache
 
 	ResumabilityConfig *agent.ResumabilityConfig
 
@@ -106,6 +108,7 @@ func New(cfg Config) (*Runner, error) {
 		sessionService:     cfg.SessionService,
 		artifactService:    cfg.ArtifactService,
 		memoryService:      cfg.MemoryService,
+		toolResponseCache:  cfg.ToolResponseCache,
 		parents:            parents,
 		pluginManager:      pluginManager,
 		resumabilityConfig: cfg.ResumabilityConfig,
@@ -116,11 +119,12 @@ func New(cfg Config) (*Runner, error) {
 // processing, event generation, and interaction with various services like
 // artifact storage, session management, and memory.
 type Runner struct {
-	appName         string
-	rootAgent       agent.Agent
-	sessionService  session.Service
-	artifactService artifact.Service
-	memoryService   memory.Service
+	appName           string
+	rootAgent         agent.Agent
+	sessionService    session.Service
+	artifactService   artifact.Service
+	memoryService     memory.Service
+	toolResponseCache agent.ToolResponseCache
 
 	resumabilityConfig *agent.ResumabilityConfig
 
@@ -186,12 +190,13 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		}
 
 		ctx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-			Artifacts:   artifacts,
-			Memory:      memoryImpl,
-			Session:     storedSession,
-			Agent:       agentToRun,
-			UserContent: msg,
-			RunConfig:   &cfg,
+			Artifacts:         artifacts,
+			Memory:            memoryImpl,
+			Session:           storedSession,
+			ToolResponseCache: r.toolResponseCache,
+			Agent:             agentToRun,
+			UserContent:       msg,
+			RunConfig:         &cfg,
 		})
 		ctx, err = r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager, options.stateDelta)
 		if err != nil {
@@ -332,7 +337,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequ
 			return
 		}
 
-		invCtx := r.newInvocationContextForLive(ctx, userID, sessionID, liveRequestQueue, cfg, agentToRun, storedSession)
+		invCtx := r.newInvocationContextForLive(ctx, liveRequestQueue, cfg, agentToRun, storedSession)
 
 		pluginManager := r.pluginManager
 		if pluginManager != nil {
@@ -389,7 +394,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequ
 	}
 }
 
-func (r *Runner) newInvocationContextForLive(ctx context.Context, userID, sessionID string, liveRequestQueue *agent.LiveRequestQueue, cfg agent.RunConfig, agentToRun agent.Agent, session session.Session) agent.InvocationContext {
+func (r *Runner) newInvocationContextForLive(ctx context.Context, liveRequestQueue *agent.LiveRequestQueue, cfg agent.RunConfig, agentToRun agent.Agent, session session.Session) agent.InvocationContext {
 	liveConnectConfig := &genai.LiveConnectConfig{
 		ResponseModalities:       cfg.ResponseModalities,
 		SpeechConfig:             cfg.SpeechConfig,
@@ -436,13 +441,13 @@ func (r *Runner) newInvocationContextForLive(ctx context.Context, userID, sessio
 	}
 
 	invCtx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-		Artifacts:        artifacts,
-		Memory:           memoryImpl,
-		Session:          session,
-		Agent:            agentToRun,
-		RunConfig:        &cfg,
-		LiveRequestQueue: liveRequestQueue,
-		//TODO in go we dont have this stored anywhere yet.
+		Artifacts:                   artifacts,
+		Memory:                      memoryImpl,
+		Session:                     session,
+		ToolResponseCache:           r.toolResponseCache,
+		Agent:                       agentToRun,
+		RunConfig:                   &cfg,
+		LiveRequestQueue:            liveRequestQueue,
 		LiveSessionResumptionHandle: "",
 		ResumabilityConfig:          r.resumabilityConfig,
 	})
