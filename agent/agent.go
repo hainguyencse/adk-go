@@ -18,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"iter"
-	"sync"
 
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/genai"
@@ -125,6 +124,13 @@ type Memory interface {
 	Search(ctx context.Context, query string) (*memory.SearchResponse, error)
 }
 
+// ToolResponseCache interface provides methods to access cached tool responses of the current session
+type ToolResponseCache interface {
+	Get(ctx context.Context, key string) (map[string]any, bool)
+	Set(ctx context.Context, key string, value map[string]any)
+	Invalidate(ctx context.Context, key string)
+}
+
 // BeforeAgentCallback is a function that is called before the agent starts
 // its run.
 // If it returns non-nil content or error, the agent run will be skipped and a
@@ -187,7 +193,7 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			runConfig:     ctx.RunConfig(),
 			endInvocation: ctx.Ended(),
 
-			toolCallCache: &invocationContextCache{},
+			toolResponseCache: ctx.ToolResponseCache(),
 		}
 		event, err := runBeforeAgentCallbacks(ctx)
 		if event != nil || err != nil {
@@ -239,7 +245,7 @@ func (a *agent) RunLive(ctx InvocationContext) iter.Seq2[*session.Event, error] 
 			transcriptionCache:          ctx.TranscriptionCache(),
 			inputRealtimeCache:          ctx.InputRealtimeCache(),
 			outputRealtimeCache:         ctx.OutputRealtimeCache(),
-			toolCallCache:               &invocationContextCache{},
+			toolResponseCache:           ctx.ToolResponseCache(),
 		}
 		event, err := runBeforeAgentCallbacks(ctx)
 		if event != nil || err != nil {
@@ -485,18 +491,14 @@ func (c *callbackContextState) All() iter.Seq2[string, any] {
 	return c.ctx.invocationContext.Session().State().All()
 }
 
-type invocationContextCache struct {
-	mu    sync.RWMutex
-	cache map[string]map[string]any
-}
-
 type invocationContext struct {
 	context.Context
 
-	agent     Agent
-	artifacts Artifacts
-	memory    Memory
-	session   session.Session
+	agent             Agent
+	artifacts         Artifacts
+	memory            Memory
+	toolResponseCache ToolResponseCache
+	session           session.Session
 
 	invocationID  string
 	branch        string
@@ -510,8 +512,6 @@ type invocationContext struct {
 	outputRealtimeCache         []RealtimeCacheEntry
 	resumabilityConfig          *ResumabilityConfig
 	liveSessionResumptionHandle string
-
-	toolCallCache *invocationContextCache
 }
 
 func (c *invocationContext) Agent() Agent {
@@ -604,26 +604,25 @@ func (c *invocationContext) LiveRequestQueue() *LiveRequestQueue {
 	return c.liveRequestQueue
 }
 
-func (c *invocationContext) GetCachedToolCall(key string) (map[string]any, bool) {
-	if c.toolCallCache == nil {
+func (c *invocationContext) ToolResponseCache() ToolResponseCache {
+	return c.toolResponseCache
+}
+
+func (c *invocationContext) GetCachedToolResponse(ctx context.Context, key string) (map[string]any, bool) {
+	if c.toolResponseCache == nil {
 		return nil, false
 	}
-	c.toolCallCache.mu.RLock()
-	defer c.toolCallCache.mu.RUnlock()
-	result, ok := c.toolCallCache.cache[key]
+
+	result, ok := c.toolResponseCache.Get(ctx, key)
 	return result, ok
 }
 
-func (c *invocationContext) SetCachedToolCall(key string, result map[string]any) {
-	if c.toolCallCache == nil {
+func (c *invocationContext) SetCachedToolResponse(ctx context.Context, key string, result map[string]any) {
+	if c.toolResponseCache == nil {
 		return
 	}
-	c.toolCallCache.mu.Lock()
-	defer c.toolCallCache.mu.Unlock()
-	if c.toolCallCache.cache == nil {
-		c.toolCallCache.cache = make(map[string]map[string]any)
-	}
-	c.toolCallCache.cache[key] = result
+
+	c.toolResponseCache.Set(ctx, key, result)
 }
 
 func pluginManagerFromContext(ctx context.Context) pluginManager {

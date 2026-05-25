@@ -26,9 +26,10 @@ import (
 )
 
 type InvocationContextParams struct {
-	Artifacts agent.Artifacts
-	Memory    agent.Memory
-	Session   session.Session
+	Artifacts         agent.Artifacts
+	Memory            agent.Memory
+	Session           session.Session
+	ToolResponseCache agent.ToolResponseCache
 
 	Branch string
 	Agent  agent.Agent
@@ -68,7 +69,6 @@ type invocationState struct {
 	transcriptionCache          []agent.TranscriptionEntry
 	inputRealtimeCache          []agent.RealtimeCacheEntry
 	outputRealtimeCache         []agent.RealtimeCacheEntry
-	toolCallCache               map[string]map[string]any
 }
 
 type InvocationContext struct {
@@ -182,23 +182,24 @@ func (c *InvocationContext) ClearOutputRealtimeCache() {
 	c.state.outputRealtimeCache = nil
 }
 
-func (c *InvocationContext) GetCachedToolCall(key string) (map[string]any, bool) {
-	c.state.mu.RLock()
-	defer c.state.mu.RUnlock()
-	if c.state.toolCallCache == nil {
-		return nil, false
-	}
-	result, ok := c.state.toolCallCache[key]
-	return result, ok
+func (c *InvocationContext) ToolResponseCache() agent.ToolResponseCache {
+	return c.params.ToolResponseCache
 }
 
-func (c *InvocationContext) SetCachedToolCall(key string, result map[string]any) {
-	c.state.mu.Lock()
-	defer c.state.mu.Unlock()
-	if c.state.toolCallCache == nil {
-		c.state.toolCallCache = make(map[string]map[string]any)
+func (c *InvocationContext) GetCachedToolResponse(ctx context.Context, key string) (map[string]any, bool) {
+	if c.params.ToolResponseCache == nil {
+		return nil, false
 	}
-	c.state.toolCallCache[key] = result
+
+	return c.params.ToolResponseCache.Get(ctx, key)
+}
+
+func (c *InvocationContext) SetCachedToolResponse(ctx context.Context, key string, result map[string]any) {
+	if c.params.ToolResponseCache == nil {
+		return
+	}
+
+	c.params.ToolResponseCache.Set(ctx, key, result)
 }
 
 var _ agent.InvocationContext = (*InvocationContext)(nil)
