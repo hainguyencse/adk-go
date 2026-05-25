@@ -585,7 +585,6 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			// TODO: generate and yield an auth event if needed.
 
 			// Handle function calls.
-
 			ev, err := f.handleFunctionCalls(ctx, tools, resp.LLMResponse, nil)
 			if err != nil {
 				yield(nil, err)
@@ -729,31 +728,20 @@ func (f *Flow) postprocessLive(ctx agent.InvocationContext, llmRequest *model.LL
 		stateDelta := make(map[string]any)
 		newResponseWithEventID := newResponseWithEventID(llmResponse)
 		newModelResponseEvent := f.finalizeModelResponseEvent(ctx, newResponseWithEventID, tools, stateDelta)
+		if !yield(newModelResponseEvent, nil) {
+			return
+		}
 
-		hashFunctionCalls := len(newModelResponseEvent.FunctionCalls()) > 0
-		if hashFunctionCalls {
-			// If the tool call is not deduped, yield the function call and function response as usual.
-			if !dedupeToolCalls(ctx, newModelResponseEvent, tools) {
-				// Yield function call
-				if !yield(newModelResponseEvent, nil) {
-					return
-				}
-
-				// Yield function response
-				functionResponseEvent, err := f.handleFunctionCalls(ctx, tools, llmResponse, nil)
-				if err != nil {
-					yield(nil, err)
-					return
-				}
-				if functionResponseEvent != nil {
-					if !yield(functionResponseEvent, nil) {
-						return
-					}
-				}
-			}
-		} else {
-			if !yield(newModelResponseEvent, nil) {
+		if len(newModelResponseEvent.FunctionCalls()) > 0 {
+			functionResponseEvent, err := f.handleFunctionCalls(ctx, tools, llmResponse, nil)
+			if err != nil {
+				yield(nil, err)
 				return
+			}
+			if functionResponseEvent != nil {
+				if !yield(functionResponseEvent, nil) {
+					return
+				}
 			}
 		}
 	}
@@ -1081,37 +1069,6 @@ func toolCallCacheKey(branch, toolName string, args map[string]any) string {
 	return fmt.Sprintf("%s\x00%s\x00%s", branch, toolName, argsJSON)
 }
 
-func dedupeToolCalls(ctx agent.InvocationContext, ev *session.Event, tools map[string]tool.Tool) bool {
-	dedupeEnabled := ctx.RunConfig() != nil && ctx.RunConfig().DedupeToolCalls
-
-	fnCalls := utils.FunctionCalls(ev.Content)
-	for _, fnCall := range fnCalls {
-		var curTool tool.Tool
-		var found bool
-		curTool, found = tools[fnCall.Name]
-		if !found {
-			return false
-		}
-
-		cacheKey := toolCallCacheKey(ctx.Branch(), fnCall.Name, fnCall.Args)
-		// Get cached -> isTriggered
-		_, isTriggered := ctx.GetCachedToolCall(cacheKey)
-
-		if isTriggered {
-			// Only check if dedupe is enabled or the tool is long-running
-			shouldDedupe := dedupeEnabled || curTool.IsLongRunning()
-			if shouldDedupe {
-				return true
-			}
-		}
-
-		// Set cached
-		ctx.SetCachedToolCall(cacheKey, map[string]any{"isTriggered": true})
-	}
-
-	return false
-}
-
 // handleFunctionCalls calls the functions and returns the function response event.
 //
 // TODO: accept filters to include/exclude function calls.
@@ -1120,8 +1077,6 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 	var fnResponseEvents []*session.Event
 	fnCalls := utils.FunctionCalls(resp.Content)
 	toolNames := slices.Collect(maps.Keys(toolsDict))
-
-	var result map[string]any
 	// Merged span for parallel tool calls - create only if there is more than one tool call.
 	if len(fnCalls) > 1 {
 		mergedCtx, mergedToolCallSpan := telemetry.StartTrace(ctx, "execute_tool (merged)")
@@ -1147,6 +1102,9 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 			toolCtx := toolinternal.NewToolContext(toolCallCtx, fnCall.ID, &session.EventActions{StateDelta: make(map[string]any)}, confirmation)
 
 			curTool, found := toolsDict[fnCall.Name]
+
+			var result map[string]any
+			var cacheHit bool
 			if !found {
 				err := newToolNotFoundError(fnCall.Name, toolNames)
 				result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, fnCall.Args, err)
@@ -1160,7 +1118,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 					result = map[string]any{"error": err.Error()}
 				}
 			} else {
-				result = f.callTool(toolCtx, funcTool, fnCall.Args)
+				result, cacheHit = f.callTool(ctx, toolCtx, funcTool, fnCall.Args)
 			}
 
 			// TODO: handle long-running tool.
@@ -1182,6 +1140,14 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 			ev.Author = ctx.Agent().Name()
 			ev.Branch = ctx.Branch()
 			ev.Actions = *toolCtx.Actions()
+
+			if cacheHit {
+				if ev.CustomMetadata == nil {
+					ev.CustomMetadata = map[string]any{}
+				}
+
+				ev.CustomMetadata["adk_tool_call_cache_hit"] = true
+			}
 
 			traceTool := curTool
 			if traceTool == nil {
@@ -1223,7 +1189,7 @@ func (f *Flow) runOnToolErrorCallbacks(toolCtx tool.Context, tool tool.Tool, fAr
 	return f.invokeOnToolErrorCallbacks(toolCtx, tool, fArgs, err)
 }
 
-func (f *Flow) callTool(toolCtx tool.Context, tool toolinternal.FunctionTool, fArgs map[string]any) map[string]any {
+func (f *Flow) executeToolPipeline(toolCtx tool.Context, tool toolinternal.FunctionTool, fArgs map[string]any) map[string]any {
 	var response map[string]any
 	var err error
 	pluginManager := pluginManagerFromContext(toolCtx)
@@ -1268,6 +1234,27 @@ func (f *Flow) callTool(toolCtx tool.Context, tool toolinternal.FunctionTool, fA
 		return map[string]any{"error": err.Error()}
 	}
 	return response
+}
+
+func (f *Flow) callTool(invocationCtx agent.InvocationContext, toolCtx tool.Context, tool toolinternal.FunctionTool, fArgs map[string]any) (funcResp map[string]any, hit bool) {
+	shouldDeDup := (invocationCtx.RunConfig() != nil && invocationCtx.RunConfig().DedupeToolCalls) || tool.IsLongRunning()
+	if shouldDeDup {
+		cacheKey := toolCallCacheKey(invocationCtx.Branch(), tool.Name(), fArgs)
+
+		defer func() {
+			if funcResp != nil {
+				invocationCtx.SetCachedToolCall(cacheKey, funcResp)
+			}
+		}()
+
+		funcResp, hit = invocationCtx.GetCachedToolCall(cacheKey)
+		if hit {
+			return
+		}
+	}
+
+	funcResp = f.executeToolPipeline(toolCtx, tool, fArgs)
+	return
 }
 
 func (f *Flow) invokeBeforeToolCallbacks(toolCtx tool.Context, tool tool.Tool, fArgs map[string]any) (map[string]any, error) {
