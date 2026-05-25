@@ -88,7 +88,7 @@ func TestToolResponseCacheService_Get(t *testing.T) {
 				getErr: tt.getErr,
 			}
 			svc := ToolResponseCacheService{
-				service:   cacheSvc,
+				Service:   cacheSvc,
 				AppName:   "app",
 				UserID:    "user",
 				SessionID: "session",
@@ -121,7 +121,7 @@ func TestToolResponseCacheService_SetAndInvalidate(t *testing.T) {
 		invalidateErr: errors.New("invalidate error"),
 	}
 	svc := ToolResponseCacheService{
-		service:   cacheSvc,
+		Service:   cacheSvc,
 		AppName:   "app",
 		UserID:    "user",
 		SessionID: "session",

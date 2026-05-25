@@ -34,11 +34,13 @@ import (
 	"google.golang.org/adk/internal/llminternal"
 	imemory "google.golang.org/adk/internal/memory"
 	"google.golang.org/adk/internal/plugininternal"
+	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/plugin"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool"
 )
 
 // Config is used to create a [Runner].
@@ -53,7 +55,7 @@ type Config struct {
 	// optional
 	MemoryService memory.Service
 	// optional
-	ToolResponseCache agent.ToolResponseCache
+	ToolResponseCache tool.ResponseCacheService
 
 	ResumabilityConfig *agent.ResumabilityConfig
 
@@ -124,7 +126,7 @@ type Runner struct {
 	sessionService    session.Service
 	artifactService   artifact.Service
 	memoryService     memory.Service
-	toolResponseCache agent.ToolResponseCache
+	toolResponseCache tool.ResponseCacheService
 
 	resumabilityConfig *agent.ResumabilityConfig
 
@@ -189,11 +191,21 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 		}
 
+		var toolResponseCache agent.ToolResponseCache = nil
+		if r.toolResponseCache != nil {
+			toolResponseCache = &toolinternal.ToolResponseCacheService{
+				Service:   r.toolResponseCache,
+				AppName:   storedSession.AppName(),
+				UserID:    storedSession.UserID(),
+				SessionID: storedSession.ID(),
+			}
+		}
+
 		ctx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 			Artifacts:         artifacts,
 			Memory:            memoryImpl,
 			Session:           storedSession,
-			ToolResponseCache: r.toolResponseCache,
+			ToolResponseCache: toolResponseCache,
 			Agent:             agentToRun,
 			UserContent:       msg,
 			RunConfig:         &cfg,
@@ -440,11 +452,21 @@ func (r *Runner) newInvocationContextForLive(ctx context.Context, liveRequestQue
 		}
 	}
 
+	var toolResponseCache agent.ToolResponseCache = nil
+	if r.toolResponseCache != nil {
+		toolResponseCache = &toolinternal.ToolResponseCacheService{
+			Service:   r.toolResponseCache,
+			AppName:   session.AppName(),
+			UserID:    session.UserID(),
+			SessionID: session.ID(),
+		}
+	}
+
 	invCtx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 		Artifacts:                   artifacts,
 		Memory:                      memoryImpl,
 		Session:                     session,
-		ToolResponseCache:           r.toolResponseCache,
+		ToolResponseCache:           toolResponseCache,
 		Agent:                       agentToRun,
 		RunConfig:                   &cfg,
 		LiveRequestQueue:            liveRequestQueue,
