@@ -31,9 +31,6 @@ type fakeResponseCacheService struct {
 
 	setReq *tool.SetRequest
 	setErr error
-
-	invalidateReq *tool.InvalidateRequest
-	invalidateErr error
 }
 
 func (svc *fakeResponseCacheService) Get(ctx context.Context, req *tool.GetRequest) (*tool.GetResponse, error) {
@@ -44,11 +41,6 @@ func (svc *fakeResponseCacheService) Get(ctx context.Context, req *tool.GetReque
 func (svc *fakeResponseCacheService) Set(ctx context.Context, req *tool.SetRequest) error {
 	svc.setReq = req
 	return svc.setErr
-}
-
-func (svc *fakeResponseCacheService) Invalidate(ctx context.Context, req *tool.InvalidateRequest) error {
-	svc.invalidateReq = req
-	return svc.invalidateErr
 }
 
 func TestToolResponseCacheService_Get(t *testing.T) {
@@ -115,10 +107,9 @@ func TestToolResponseCacheService_Get(t *testing.T) {
 	}
 }
 
-func TestToolResponseCacheService_SetAndInvalidate(t *testing.T) {
+func TestToolResponseCacheService_Set(t *testing.T) {
 	cacheSvc := &fakeResponseCacheService{
-		setErr:        errors.New("set error"),
-		invalidateErr: errors.New("invalidate error"),
+		setErr: errors.New("set error"),
 	}
 	svc := ToolResponseCacheService{
 		Service:   cacheSvc,
@@ -138,16 +129,5 @@ func TestToolResponseCacheService_SetAndInvalidate(t *testing.T) {
 	}
 	if diff := cmp.Diff(wantSetReq, cacheSvc.setReq); diff != "" {
 		t.Errorf("ToolResponseCacheService.Set() request mismatch (-want +got):\n%s", diff)
-	}
-
-	svc.Invalidate(t.Context(), "cache-key")
-	wantInvalidateReq := &tool.InvalidateRequest{
-		AppName:   "app",
-		UserID:    "user",
-		SessionID: "session",
-		Key:       "cache-key",
-	}
-	if diff := cmp.Diff(wantInvalidateReq, cacheSvc.invalidateReq); diff != "" {
-		t.Errorf("ToolResponseCacheService.Invalidate() request mismatch (-want +got):\n%s", diff)
 	}
 }

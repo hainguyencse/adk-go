@@ -85,23 +85,6 @@ func TestInMemoryResponseCacheService(t *testing.T) {
 		t.Errorf("ResponseCacheService.Get() response mismatch (-want +got):\n%s", diff)
 	}
 
-	if err := svc.Invalidate(ctx, &tool.InvalidateRequest{
-		AppName:   req.AppName,
-		UserID:    req.UserID,
-		SessionID: req.SessionID,
-		Key:       req.Key,
-	}); err != nil {
-		t.Fatalf("ResponseCacheService.Invalidate() error = %v", err)
-	}
-
-	got, err = svc.Get(ctx, req)
-	if err != nil {
-		t.Fatalf("ResponseCacheService.Get() error = %v", err)
-	}
-	if got.Found {
-		t.Errorf("ResponseCacheService.Get() found = true after invalidate, want false")
-	}
-
 	got, err = svc.Get(ctx, &tool.GetRequest{
 		AppName:   req.AppName,
 		UserID:    req.UserID,
@@ -129,9 +112,5 @@ func TestInMemoryResponseCacheService_NilRequest(t *testing.T) {
 
 	if _, err := svc.Get(ctx, nil); !errors.Is(err, tool.ErrRequestRequired) {
 		t.Errorf("ResponseCacheService.Get() error = %v, want %v", err, tool.ErrRequestRequired)
-	}
-
-	if err := svc.Invalidate(ctx, nil); !errors.Is(err, tool.ErrRequestRequired) {
-		t.Errorf("ResponseCacheService.Invalidate() error = %v, want %v", err, tool.ErrRequestRequired)
 	}
 }

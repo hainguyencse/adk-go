@@ -64,12 +64,3 @@ func (svc ToolResponseCacheService) Set(ctx context.Context, key string, value m
 		ToolResponse: value,
 	})
 }
-
-func (svc ToolResponseCacheService) Invalidate(ctx context.Context, key string) {
-	_ = svc.Service.Invalidate(ctx, &tool.InvalidateRequest{
-		AppName:   svc.AppName,
-		UserID:    svc.UserID,
-		SessionID: svc.SessionID,
-		Key:       key,
-	})
-}
