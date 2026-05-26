@@ -13,7 +13,6 @@ var (
 type ResponseCacheService interface {
 	Set(ctx context.Context, req *SetRequest) error
 	Get(ctx context.Context, req *GetRequest) (*GetResponse, error)
-	Invalidate(ctx context.Context, req *InvalidateRequest) error
 }
 
 type SetRequest struct {
@@ -30,11 +29,6 @@ type GetRequest struct {
 type GetResponse struct {
 	Found        bool
 	ToolResponse map[string]any
-}
-
-type InvalidateRequest struct {
-	AppName, UserID, SessionID string
-	Key                        string
 }
 
 type responseCacheKey struct {
@@ -92,23 +86,4 @@ func (svc *inMemoryResponseCacheService) Get(ctx context.Context, req *GetReques
 		Found:        found,
 		ToolResponse: value,
 	}, nil
-}
-
-func (svc *inMemoryResponseCacheService) Invalidate(ctx context.Context, req *InvalidateRequest) error {
-	if req == nil {
-		return ErrRequestRequired
-	}
-
-	svc.mu.Lock()
-	defer svc.mu.Unlock()
-
-	key := responseCacheKey{
-		appName:   req.AppName,
-		userID:    req.UserID,
-		sessionID: req.SessionID,
-		key:       req.Key,
-	}
-	delete(svc.store, key)
-
-	return nil
 }

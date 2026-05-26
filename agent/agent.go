@@ -128,7 +128,6 @@ type Memory interface {
 type ToolResponseCache interface {
 	Get(ctx context.Context, key string) (map[string]any, bool)
 	Set(ctx context.Context, key string, value map[string]any)
-	Invalidate(ctx context.Context, key string)
 }
 
 // BeforeAgentCallback is a function that is called before the agent starts

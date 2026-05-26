@@ -426,10 +426,6 @@ func (c *testToolResponseCache) Set(ctx context.Context, key string, value map[s
 	c.responses[key] = value
 }
 
-func (c *testToolResponseCache) Invalidate(ctx context.Context, key string) {
-	delete(c.responses, key)
-}
-
 func TestCallToolDedup(t *testing.T) {
 	tests := []struct {
 		name          string
