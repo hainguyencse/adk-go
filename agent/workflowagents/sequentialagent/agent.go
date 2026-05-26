@@ -18,6 +18,8 @@ package sequentialagent
 import (
 	"fmt"
 	"iter"
+	"log"
+	"sync"
 
 	"google.golang.org/adk/agent"
 	agentinternal "google.golang.org/adk/internal/agent"
@@ -27,51 +29,28 @@ import (
 	"google.golang.org/adk/tool/functiontool"
 )
 
-const (
-	taskCompletedToolName = "task_completed"
-	taskCompletedInstr    = `
-If you finished the user's request according to its description, call the task_completed function to exit so the next agents can take over. When calling this function, do not generate any text other than the function call.`
-)
-
-// taskCompletedArgs is the input type for the task_completed tool (no args needed).
-type taskCompletedArgs struct{}
-
-// taskCompletedResult is the output type for the task_completed tool.
-type taskCompletedResult struct {
-	Result string `json:"result"`
-}
-
-// newTaskCompletedTool creates the task_completed function tool.
-// When the model calls this tool, it sets Escalate=true on the event actions,
-// signaling the sequential agent to move to the next sub-agent.
-func newTaskCompletedTool() (tool.Tool, error) {
-	return functiontool.New(
-		functiontool.Config{
-			Name:        taskCompletedToolName,
-			Description: "Signals that the agent has successfully completed the user's question or task.",
-		},
-		func(ctx tool.Context, args taskCompletedArgs) (taskCompletedResult, error) {
-			ctx.Actions().Escalate = true
-			return taskCompletedResult{Result: "Task completion signaled."}, nil
-		},
-	)
-}
-
 // New creates a SequentialAgent.
 //
 // SequentialAgent executes its sub-agents once, in the order they are listed.
-//
+type seqAgent struct {
+	agent.Agent
+	*agentinternal.State
+	impl *sequentialAgent
+}
+
+func (s *seqAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+	return s.impl.RunLive(ctx)
+}
+
 // Use the SequentialAgent when you want the execution to occur in a fixed,
 // strict order.
 func New(cfg Config) (agent.Agent, error) {
-	// // Set RunLive before passing to loopagent so it overrides the default.
 	if cfg.AgentConfig.Run != nil {
 		return nil, fmt.Errorf("LoopAgent doesn't allow custom Run implementations")
 	}
 
 	sequentialAgentImpl := &sequentialAgent{}
 	cfg.AgentConfig.Run = sequentialAgentImpl.Run
-	cfg.AgentConfig.RunLive = sequentialAgentImpl.RunLive
 
 	sequentialAgent, err := agent.New(cfg.AgentConfig)
 	if err != nil {
@@ -86,53 +65,13 @@ func New(cfg Config) (agent.Agent, error) {
 	state.AgentType = agentinternal.TypeSequentialAgent
 	state.Config = cfg
 
-	return sequentialAgent, nil
+	return &seqAgent{Agent: sequentialAgent, State: state, impl: sequentialAgentImpl}, nil
 }
 
 // Config defines the configuration for a SequentialAgent.
 type Config struct {
 	// Basic agent setup.
 	AgentConfig agent.Config
-}
-
-// injectTaskCompletedTool adds the task_completed tool and instruction to each
-// LlmAgent sub-agent that doesn't already have it. This allows the model to
-// signal completion in live mode.
-func injectTaskCompletedTool(subAgents []agent.Agent) error {
-	var tcTool tool.Tool
-
-	for _, subAgent := range subAgents {
-		llmA, ok := subAgent.(llminternal.Agent)
-		if !ok {
-			continue
-		}
-		state := llminternal.Reveal(llmA)
-
-		// Dedup: skip if already injected.
-		hasTC := false
-		for _, t := range state.Tools {
-			if t.Name() == taskCompletedToolName {
-				hasTC = true
-				break
-			}
-		}
-		if hasTC {
-			continue
-		}
-
-		// Lazily create the tool (only if we have at least one LlmAgent).
-		if tcTool == nil {
-			var err error
-			tcTool, err = newTaskCompletedTool()
-			if err != nil {
-				return err
-			}
-		}
-
-		state.Tools = append(state.Tools, tcTool)
-		state.Instruction += taskCompletedInstr
-	}
-	return nil
 }
 
 type sequentialAgent struct{}
@@ -150,33 +89,117 @@ func (a *sequentialAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Ev
 	}
 }
 
-func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-	return func(yield func(*session.Event, error) bool) {
-		subAgents := ctx.Agent().SubAgents()
-		if len(subAgents) == 0 {
-			return
-		}
+type sequentialLiveSession struct {
+	mu         sync.Mutex
+	activeSess agent.LiveSession
+	closed     bool
+}
 
-		if err := injectTaskCompletedTool(subAgents); err != nil {
-			yield(nil, fmt.Errorf("failed to initialize task_completed tool: %w", err))
-			return
-		}
+func (s *sequentialLiveSession) Send(req agent.LiveRequest) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return fmt.Errorf("session is closed")
+	}
+	if s.activeSess == nil {
+		return fmt.Errorf("no active sub-agent live session")
+	}
+	return s.activeSess.Send(req)
+}
 
-		for _, subAgent := range subAgents {
-			// Clear resumption handle between sub-agents since each gets a fresh
-			// live session with different tools/instructions.
-			ctx.SetLiveSessionResumptionHandle("")
+func (s *sequentialLiveSession) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closed = true
+	if s.activeSess != nil {
+		return s.activeSess.Close()
+	}
+	return nil
+}
 
-			for event, err := range subAgent.RunLive(ctx) {
-				if !yield(event, err) {
-					return
-				}
-				// When task_completed is called, the event has Escalate=true.
-				// Break to move to the next sub-agent.
-				if event != nil && event.Actions.Escalate {
+func (s *sequentialLiveSession) setActiveSession(sess agent.LiveSession) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.activeSess = sess
+}
+
+func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+	subAgents := ctx.Agent().SubAgents()
+	if len(subAgents) == 0 {
+		return nil, nil, fmt.Errorf("sequential agent has no sub-agents")
+	}
+
+	// Inject task_completed tool into sub LLM agents
+	type taskCompletedArgs struct{}
+	type taskCompletedResults struct {
+		Result string `json:"result"`
+	}
+
+	taskCompletedTool, err := functiontool.New(functiontool.Config{
+		Name:        "task_completed",
+		Description: "Signals that the agent has successfully completed the user's question or task.",
+	}, func(ctx tool.Context, args taskCompletedArgs) (taskCompletedResults, error) {
+		return taskCompletedResults{Result: "Task completion signaled."}, nil
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create task_completed tool: %w", err)
+	}
+
+	for _, subAgent := range subAgents {
+		if llmAgent, ok := subAgent.(llminternal.Agent); ok {
+			state := llminternal.Reveal(llmAgent)
+			hasTaskCompleted := false
+			for _, t := range state.Tools {
+				if t.Name() == "task_completed" {
+					hasTaskCompleted = true
 					break
 				}
 			}
+			if !hasTaskCompleted {
+				state.Tools = append(state.Tools, taskCompletedTool)
+				instructionSuffix := "\nIf you finished the user's request according to its description, call the task_completed function to exit so the next agents can take over. When calling this function, do not generate any text other than the function call."
+				state.Instruction += instructionSuffix
+			}
 		}
 	}
+
+	seqSess := &sequentialLiveSession{}
+
+	wrappedIter := func(yield func(*session.Event, error) bool) {
+		for _, subAgent := range subAgents {
+			liveAgent, ok := subAgent.(interface {
+				RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
+			})
+			if !ok {
+				if !yield(nil, fmt.Errorf("sub-agent %s does not support Live Run", subAgent.Name())) {
+					return
+				}
+				return
+			}
+
+			subSess, innerIter, err := liveAgent.RunLive(ctx)
+			if err != nil {
+				if !yield(nil, fmt.Errorf("sub-agent %s RunLive failed: %w", subAgent.Name(), err)) {
+					return
+				}
+				return
+			}
+
+			seqSess.setActiveSession(subSess)
+
+			for ev, err := range innerIter {
+				if !yield(ev, err) {
+					if err := subSess.Close(); err != nil {
+						log.Printf("error closing sub-session: %v\n", err)
+					}
+					return
+				}
+			}
+			if err := subSess.Close(); err != nil {
+				log.Printf("error closing sub-session: %v\n", err)
+			}
+		}
+	}
+
+	return seqSess, wrappedIter, nil
 }

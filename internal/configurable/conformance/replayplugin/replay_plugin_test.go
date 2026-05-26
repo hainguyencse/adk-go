@@ -60,6 +60,83 @@ recordings:
           - role: "user"
             parts:
               - text: "Hello"
+      llm_responses:
+        - content:
+            role: "model"
+            parts:
+              - text: "Recorded response"
+`
+		createRecordingsFile(t, tempDir, recordingsYaml)
+
+		// 2. Setup replay config
+		err := mockSession.State().Set("_adk_replay_config", map[string]any{
+			"dir":                tempDir,
+			"user_message_index": 0,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// 3. Load recordings (BeforeRunCallback)
+		invContext := &MockInvocationContext{
+			session:      mockSession,
+			invocationID: "test-invocation",
+		}
+		_, err = plugin.BeforeRunCallback()(invContext)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// 4. Call BeforeModelCallback with matching request
+		cbContext := &MockCallbackContext{
+			state:        mockSession.State(),
+			invocationID: "test-invocation",
+			agentName:    "test_agent",
+		}
+
+		request := &model.LLMRequest{
+			Model: "gemini-2.0-flash",
+			Contents: []*genai.Content{
+				{
+					Role:  "user",
+					Parts: []*genai.Part{{Text: "Hello"}},
+				},
+			},
+		}
+
+		result, err := plugin.BeforeModelCallback()(cbContext, request)
+		// 5. Verify
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result == nil {
+			t.Fatal("expected non-nil result")
+		}
+		if result.Content == nil {
+			t.Fatal("expected non-nil result.Content")
+		}
+
+		if got := result.Content.Parts[0].Text; got != "Recorded response" {
+			t.Errorf("expected %q, got %q", "Recorded response", got)
+		}
+	})
+
+	t.Run("BeforeModelCallback_WithSingleLlmResponse_ReturnsRecordedResponse", func(t *testing.T) {
+		plugin, mockSession, _ := setup(t)
+		tempDir := t.TempDir()
+
+		// 1. Create recording file with singular llm_response instead of plural llm_responses
+		recordingsYaml := `
+recordings:
+  - user_message_index: 0
+    agent_name: "test_agent"
+    llm_recording:
+      llm_request:
+        model: "gemini-2.0-flash"
+        contents:
+          - role: "user"
+            parts:
+              - text: "Hello"
       llm_response:
         content:
           role: "model"
@@ -389,39 +466,21 @@ type MockInvocationContext struct {
 	invocationID string
 }
 
-func (m *MockInvocationContext) Session() session.Session                                 { return m.session }
-func (m *MockInvocationContext) InvocationID() string                                     { return m.invocationID }
-func (m *MockInvocationContext) Agent() agent.Agent                                       { return nil }
-func (m *MockInvocationContext) Artifacts() agent.Artifacts                               { return nil }
-func (m *MockInvocationContext) Memory() agent.Memory                                     { return nil }
-func (m *MockInvocationContext) Branch() string                                           { return "" }
-func (m *MockInvocationContext) UserContent() *genai.Content                              { return nil }
-func (m *MockInvocationContext) RunConfig() *agent.RunConfig                              { return nil } // Use context? No, RunConfig struct.
-func (m *MockInvocationContext) EndInvocation()                                           {}
-func (m *MockInvocationContext) Ended() bool                                              { return false }
-func (m *MockInvocationContext) WithContext(ctx context.Context) agent.InvocationContext  { return m }
-func (m *MockInvocationContext) Value(key any) any                                        { return nil }
-func (m *MockInvocationContext) Deadline() (deadline time.Time, ok bool)                  { return time.Time{}, false }
-func (m *MockInvocationContext) Done() <-chan struct{}                                    { return nil }
-func (m *MockInvocationContext) Err() error                                               { return nil }
-func (m *MockInvocationContext) AppendInputRealtimeCache(entry agent.RealtimeCacheEntry)  {}
-func (m *MockInvocationContext) AppendOutputRealtimeCache(entry agent.RealtimeCacheEntry) {}
-func (m *MockInvocationContext) ClearInputRealtimeCache()                                 {}
-func (m *MockInvocationContext) ClearOutputRealtimeCache()                                {}
-func (m *MockInvocationContext) SetLiveSessionResumptionHandle(handle string)             {}
-func (m *MockInvocationContext) LiveSessionResumptionHandle() string                      { return "" }
-func (m *MockInvocationContext) InputRealtimeCache() []agent.RealtimeCacheEntry           { return nil }
-func (m *MockInvocationContext) OutputRealtimeCache() []agent.RealtimeCacheEntry          { return nil }
-func (m *MockInvocationContext) ResumabilityConfig() *agent.ResumabilityConfig            { return nil }
-func (m *MockInvocationContext) LiveRequestQueue() *agent.LiveRequestQueue                { return nil }
-func (m *MockInvocationContext) TranscriptionCache() []agent.TranscriptionEntry           { return nil }
-func (m *MockInvocationContext) ToolResponseCache() agent.ToolResponseCache               { return nil }
-func (m *MockInvocationContext) GetCachedToolResponse(ctx context.Context, key string) (map[string]any, bool) {
-	return nil, false
-}
-func (m *MockInvocationContext) SetCachedToolResponse(ctx context.Context, key string, result map[string]any) {
-	return
-}
+func (m *MockInvocationContext) Session() session.Session                                { return m.session }
+func (m *MockInvocationContext) InvocationID() string                                    { return m.invocationID }
+func (m *MockInvocationContext) Agent() agent.Agent                                      { return nil }
+func (m *MockInvocationContext) Artifacts() agent.Artifacts                              { return nil }
+func (m *MockInvocationContext) Memory() agent.Memory                                    { return nil }
+func (m *MockInvocationContext) Branch() string                                          { return "" }
+func (m *MockInvocationContext) UserContent() *genai.Content                             { return nil }
+func (m *MockInvocationContext) RunConfig() *agent.RunConfig                             { return nil } // Use context? No, RunConfig struct.
+func (m *MockInvocationContext) EndInvocation()                                          {}
+func (m *MockInvocationContext) Ended() bool                                             { return false }
+func (m *MockInvocationContext) WithContext(ctx context.Context) agent.InvocationContext { return m }
+func (m *MockInvocationContext) Value(key any) any                                       { return nil }
+func (m *MockInvocationContext) Deadline() (deadline time.Time, ok bool)                 { return time.Time{}, false }
+func (m *MockInvocationContext) Done() <-chan struct{}                                   { return nil }
+func (m *MockInvocationContext) Err() error                                              { return nil }
 
 // MockCallbackContext
 type MockCallbackContext struct {

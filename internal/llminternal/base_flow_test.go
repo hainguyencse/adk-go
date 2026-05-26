@@ -15,7 +15,6 @@
 package llminternal
 
 import (
-	"context"
 	"errors"
 	"testing"
 
@@ -31,9 +30,8 @@ import (
 )
 
 type mockFunctionTool struct {
-	name          string
-	isLongRunning bool
-	runFunc       func(tool.Context, map[string]any) (map[string]any, error)
+	name    string
+	runFunc func(tool.Context, map[string]any) (map[string]any, error)
 }
 
 func (m *mockFunctionTool) Name() string {
@@ -53,7 +51,7 @@ func (m *mockFunctionTool) OutputSchema() *genai.Schema {
 }
 
 func (m *mockFunctionTool) IsLongRunning() bool {
-	return m.isLongRunning
+	return false
 }
 
 func (m *mockFunctionTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
@@ -69,6 +67,31 @@ func (m *mockFunctionTool) Run(ctx tool.Context, args any) (map[string]any, erro
 
 func (m *mockFunctionTool) Declaration() *genai.FunctionDeclaration {
 	return nil
+}
+
+type mockToolset struct {
+	name string
+}
+
+func (m *mockToolset) Name() string { return m.name }
+func (m *mockToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
+	return nil, nil
+}
+
+type mockRequestProcessorToolset struct {
+	name    string
+	process func(ctx tool.Context, req *model.LLMRequest) error
+}
+
+func (m *mockRequestProcessorToolset) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
+	if m.process != nil {
+		return m.process(ctx, req)
+	}
+	return nil
+}
+func (m *mockRequestProcessorToolset) Name() string { return m.name }
+func (m *mockRequestProcessorToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
+	return nil, nil
 }
 
 type testCase struct {
@@ -398,125 +421,9 @@ func TestCallTool(t *testing.T) {
 				OnToolErrorCallbacks: tc.onToolErrorCallbacks,
 			}
 			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
-			got, _ := f.callTool(ctx, toolinternal.NewToolContext(ctx, "", nil, nil), tc.tool, tc.args)
+			got := f.callTool(toolinternal.NewToolContext(ctx, "", nil, nil), tc.tool, tc.args)
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("callTool() mismatch (-want +got):\n%s", diff)
-			}
-		})
-	}
-}
-
-type testToolResponseCache struct {
-	responses map[string]map[string]any
-	getKeys   []string
-	setKeys   []string
-}
-
-func (c *testToolResponseCache) Get(ctx context.Context, key string) (map[string]any, bool) {
-	c.getKeys = append(c.getKeys, key)
-	resp, ok := c.responses[key]
-	return resp, ok
-}
-
-func (c *testToolResponseCache) Set(ctx context.Context, key string, value map[string]any) {
-	if c.responses == nil {
-		c.responses = map[string]map[string]any{}
-	}
-	c.setKeys = append(c.setKeys, key)
-	c.responses[key] = value
-}
-
-func TestCallToolDedup(t *testing.T) {
-	tests := []struct {
-		name          string
-		runConfig     *agent.RunConfig
-		isLongRunning bool
-		wantDedup     bool
-	}{
-		{
-			name:      "dedupe disabled",
-			runConfig: &agent.RunConfig{},
-		},
-		{
-			name: "dedupe enabled by run config",
-			runConfig: &agent.RunConfig{
-				DedupeToolCalls: true,
-			},
-			wantDedup: true,
-		},
-		{
-			name:          "dedupe enabled for long running tool",
-			isLongRunning: true,
-			wantDedup:     true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cache := &testToolResponseCache{}
-			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
-				Branch:            "branch",
-				RunConfig:         tt.runConfig,
-				ToolResponseCache: cache,
-			})
-			args := map[string]any{"key": "value"}
-			callCount := 0
-			fnTool := &mockFunctionTool{
-				name:          "testTool",
-				isLongRunning: tt.isLongRunning,
-				runFunc: func(ctx tool.Context, args map[string]any) (map[string]any, error) {
-					callCount++
-					return map[string]any{"result": "success"}, nil
-				},
-			}
-			f := &Flow{}
-
-			first, firstHit := f.callTool(ctx, toolinternal.NewToolContext(ctx, "", nil, nil), fnTool, args)
-			second, secondHit := f.callTool(ctx, toolinternal.NewToolContext(ctx, "", nil, nil), fnTool, args)
-
-			want := map[string]any{"result": "success"}
-			if diff := cmp.Diff(want, first); diff != "" {
-				t.Errorf("first callTool() response mismatch (-want +got):\n%s", diff)
-			}
-			if diff := cmp.Diff(want, second); diff != "" {
-				t.Errorf("second callTool() response mismatch (-want +got):\n%s", diff)
-			}
-
-			if tt.wantDedup {
-				if firstHit {
-					t.Errorf("first callTool() cache hit = true, want false")
-				}
-				if !secondHit {
-					t.Errorf("second callTool() cache hit = false, want true")
-				}
-				if callCount != 1 {
-					t.Errorf("tool run count = %d, want 1", callCount)
-				}
-
-				wantCacheKey := toolCallCacheKey("branch", "testTool", args)
-				if diff := cmp.Diff([]string{wantCacheKey, wantCacheKey}, cache.getKeys); diff != "" {
-					t.Errorf("cache get keys mismatch (-want +got):\n%s", diff)
-				}
-				if diff := cmp.Diff(want, cache.responses[wantCacheKey]); diff != "" {
-					t.Errorf("cached response mismatch (-want +got):\n%s", diff)
-				}
-				return
-			}
-
-			if firstHit {
-				t.Errorf("first callTool() cache hit = true, want false")
-			}
-			if secondHit {
-				t.Errorf("second callTool() cache hit = true, want false")
-			}
-			if callCount != 2 {
-				t.Errorf("tool run count = %d, want 2", callCount)
-			}
-			if len(cache.getKeys) != 0 {
-				t.Errorf("cache get keys = %v, want empty", cache.getKeys)
-			}
-			if len(cache.setKeys) != 0 {
-				t.Errorf("cache set keys = %v, want empty", cache.setKeys)
 			}
 		})
 	}
@@ -690,6 +597,88 @@ func TestMergeEventActions(t *testing.T) {
 			got := mergeEventActions(tc.base, tc.other)
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("mergeEventActions() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestPreprocess_Toolset(t *testing.T) {
+	noOpAgent, err := agent.New(agent.Config{Name: "no-op"})
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		agent     agent.Agent
+		wantModel string
+		wantError bool
+	}{
+		{
+			name:      "agent not llminternal.Agent",
+			agent:     noOpAgent,
+			wantError: false,
+		},
+		{
+			name:      "agent has no toolsets",
+			agent:     &mockLLMAgent{s: &State{}},
+			wantError: false,
+		},
+		{
+			name: "toolset implements RequestProcessor, error",
+			agent: &mockLLMAgent{
+				s: &State{
+					Toolsets: []tool.Toolset{&mockRequestProcessorToolset{
+						name: "toolset",
+						process: func(_ tool.Context, _ *model.LLMRequest) error {
+							return errors.New("process error")
+						},
+					}},
+				},
+			},
+			wantError: true,
+		},
+		{
+			name: "toolsets, success",
+			agent: &mockLLMAgent{
+				s: &State{
+					Toolsets: []tool.Toolset{
+						&mockToolset{name: "toolset_without_processor"},
+						&mockRequestProcessorToolset{
+							name: "toolset_with_processor",
+							process: func(_ tool.Context, req *model.LLMRequest) error {
+								req.Model = "modified-model"
+								return nil
+							},
+						},
+					},
+				},
+			},
+			wantError: false,
+			wantModel: "modified-model",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &Flow{}
+			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: tc.agent})
+			req := &model.LLMRequest{}
+
+			events := f.preprocess(ctx, req)
+
+			var gotErr error
+			for _, err := range events {
+				if err != nil {
+					gotErr = err
+					break
+				}
+			}
+			if (gotErr != nil) != tc.wantError {
+				t.Errorf("preprocess() error = %v, wantError %v", gotErr, tc.wantError)
+			}
+			if req.Model != tc.wantModel {
+				t.Errorf("preprocess() model = %s, wantModel %s", req.Model, tc.wantModel)
 			}
 		})
 	}

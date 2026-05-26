@@ -143,23 +143,13 @@ func AppendInstructions(r *model.LLMRequest, instructions ...string) {
 		r.Config = &genai.GenerateContentConfig{}
 	}
 
-	if r.LiveConnectConfig == nil {
-		r.LiveConnectConfig = &genai.LiveConnectConfig{}
-	}
-
 	if r.Config.SystemInstruction == nil {
 		r.Config.SystemInstruction = genai.NewContentFromText(inst, genai.RoleUser)
-	} else if len(r.Config.SystemInstruction.Parts) > 0 && r.Config.SystemInstruction.Parts[len(r.Config.SystemInstruction.Parts)-1].Text != "" {
+		return
+	}
+	if len(r.Config.SystemInstruction.Parts) > 0 && r.Config.SystemInstruction.Parts[len(r.Config.SystemInstruction.Parts)-1].Text != "" {
 		r.Config.SystemInstruction.Parts[len(r.Config.SystemInstruction.Parts)-1].Text += "\n\n" + inst
-	} else {
-		r.Config.SystemInstruction.Parts = append(r.Config.SystemInstruction.Parts, genai.NewPartFromText(inst))
+		return
 	}
-
-	if r.LiveConnectConfig.SystemInstruction == nil {
-		r.LiveConnectConfig.SystemInstruction = genai.NewContentFromText(inst, genai.RoleUser)
-	} else if len(r.LiveConnectConfig.SystemInstruction.Parts) > 0 && r.LiveConnectConfig.SystemInstruction.Parts[len(r.LiveConnectConfig.SystemInstruction.Parts)-1].Text != "" {
-		r.LiveConnectConfig.SystemInstruction.Parts[len(r.LiveConnectConfig.SystemInstruction.Parts)-1].Text += "\n\n" + inst
-	} else {
-		r.LiveConnectConfig.SystemInstruction.Parts = append(r.LiveConnectConfig.SystemInstruction.Parts, genai.NewPartFromText(inst))
-	}
+	r.Config.SystemInstruction.Parts = append(r.Config.SystemInstruction.Parts, genai.NewPartFromText(inst))
 }

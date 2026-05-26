@@ -129,7 +129,11 @@ func (p *replayPlugin) beforeModel(ctx agent.CallbackContext, req *model.LLMRequ
 		return nil, err
 	}
 
-	return recording.LLMResponse, nil
+	if len(recording.LLMResponses) == 0 {
+		return nil, fmt.Errorf("no LLM responses found in recording for agent %q", agentName)
+	}
+
+	return recording.LLMResponses[0], nil
 }
 
 // beforeTool intercepts tool calls, verifies them against the recording, and returns the recorded response.
@@ -328,8 +332,12 @@ func (p *replayPlugin) loadInvocationState(ctx agent.InvocationContext) (*invoca
 			prevMessageId = recordings.Recordings[i].UserMessageIndex
 			index = 0
 		}
-		recordings.Recordings[i].Index = index
-		index++
+		if recordings.Recordings[i].LLMRecording != nil {
+			recordings.Recordings[i].Index = index
+			index++
+		} else {
+			recordings.Recordings[i].Index = -1 // Not used for sync
+		}
 	}
 
 	// 4. Create and Store State
@@ -421,6 +429,17 @@ func verifyLLMRequestMatch(expectedLLMRequest, actualLLMRequest *model.LLMReques
 		cmpopts.EquateEmpty(),
 	}
 
+	for _, toolAny := range expectedLLMRequest.Tools {
+		if funcDecl, ok := toolAny.(*genai.FunctionDeclaration); ok {
+			funcDecl.Description = normalizeDescription(funcDecl.Description)
+		}
+	}
+	for _, toolAny := range actualLLMRequest.Tools {
+		if funcDecl, ok := toolAny.(*genai.FunctionDeclaration); ok {
+			funcDecl.Description = normalizeDescription(funcDecl.Description)
+		}
+	}
+
 	if transferToolAny, ok := expectedLLMRequest.Tools["transfer_to_agent"]; ok {
 		transferTool := transferToolAny.(*genai.FunctionDeclaration)
 		transferTool.Description = `Transfer the question to another agent.
@@ -430,10 +449,19 @@ This tool hands off control to another agent when it's more suitable to answer t
 	if expectedLLMRequest.Config != nil {
 		for _, tool := range expectedLLMRequest.Config.Tools {
 			for _, funcDecl := range tool.FunctionDeclarations {
+				funcDecl.Description = normalizeDescription(funcDecl.Description)
 				if funcDecl.Name == "transfer_to_agent" {
 					funcDecl.Description = `Transfer the question to another agent.
 This tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.`
 				}
+			}
+		}
+	}
+
+	if actualLLMRequest.Config != nil {
+		for _, tool := range actualLLMRequest.Config.Tools {
+			for _, funcDecl := range tool.FunctionDeclarations {
+				funcDecl.Description = normalizeDescription(funcDecl.Description)
 			}
 		}
 	}
@@ -507,26 +535,57 @@ func modifyString(input string) string {
 	})
 }
 
+// getNextToolRecordingForAgent retrieves the next unconsumed tool recording that matches the given function.
+func getNextToolRecordingForAgent(state *invocationReplayState, agentName string, matchFn func(*recording.Recording) (bool, error)) (*recording.Recording, error) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	var firstError error
+
+	for i := range state.recordings.Recordings {
+		rec := &state.recordings.Recordings[i]
+		if rec.UserMessageIndex != state.userMessageIndex || rec.AgentName != agentName {
+			continue
+		}
+		if state.consumedRecordings[i] {
+			continue
+		}
+
+		matched, err := matchFn(rec)
+		if matched {
+			state.consumedRecordings[i] = true
+			return rec, nil
+		}
+		if firstError == nil && err != nil {
+			firstError = err
+		}
+	}
+
+	if firstError != nil {
+		return nil, firstError
+	}
+
+	return nil, fmt.Errorf("no matching tool recording found for agent '%s' at user_message_index %d", agentName, state.userMessageIndex)
+}
+
 // verifyAndGetNextToolRecordingForAgent ensures the next recording is a tool call and matches the actual call.
 func (p *replayPlugin) verifyAndGetNextToolRecordingForAgent(state *invocationReplayState, agentName string, t tool.Tool, args map[string]any) (*recording.ToolRecording, error) {
-	currentAgentIndex, ok := state.GetAgentReplayIndex(agentName)
-	if !ok {
-		currentAgentIndex = 0
+	matchFn := func(rec *recording.Recording) (bool, error) {
+		if rec.ToolRecording == nil {
+			return false, fmt.Errorf("expected tool recording for agent '%s', but found LLM recording", agentName)
+		}
+		err := verifyToolCallMatch(rec.ToolRecording.ToolCall, t.Name(), args, agentName, state.agentReplayIndices[agentName])
+		return err == nil, err
 	}
-	expectedRecording, err := getNextRecordingForAgent(state, agentName)
+
+	expectedRecording, err := getNextToolRecordingForAgent(state, agentName, matchFn)
 	if err != nil {
 		return nil, err
 	}
 
-	if expectedRecording.ToolRecording == nil {
-		return nil, fmt.Errorf("expected tool recording for agent '%s' at index %d, but found LLM recording", agentName, currentAgentIndex)
-	}
-
-	// Strict verification of tool call
-	err = verifyToolCallMatch(expectedRecording.ToolRecording.ToolCall, t.Name(), args, agentName, currentAgentIndex)
-	if err != nil {
-		return nil, err
-	}
+	state.mu.Lock()
+	state.agentReplayIndices[agentName]++
+	state.mu.Unlock()
 
 	return expectedRecording.ToolRecording, nil
 }
@@ -544,4 +603,20 @@ func verifyToolCallMatch(expectedToolCall *genai.FunctionCall, toolName string, 
 	}
 
 	return nil
+}
+
+func normalizeDescription(desc string) string {
+	lines := strings.Split(desc, "\n")
+	var cleaned []string
+	for _, line := range lines {
+		cleaned = append(cleaned, strings.TrimSpace(line))
+	}
+	// Remove empty lines at the start and end
+	for len(cleaned) > 0 && cleaned[0] == "" {
+		cleaned = cleaned[1:]
+	}
+	for len(cleaned) > 0 && cleaned[len(cleaned)-1] == "" {
+		cleaned = cleaned[:len(cleaned)-1]
+	}
+	return strings.Join(cleaned, "\n")
 }

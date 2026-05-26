@@ -186,7 +186,7 @@ func (m *MockModel) GenerateStream(ctx context.Context, req *model.LLMRequest) i
 			if len(m.Responses) == 0 {
 				break
 			}
-			resp := &genai.GenerateContentResponse{Candidates: []*genai.Candidate{{Content: m.Responses[0]}}}
+			resp := &genai.GenerateContentResponse{Candidates: []*genai.Candidate{{Content: m.Responses[0], FinishReason: genai.FinishReasonStop}}}
 			m.Responses = m.Responses[1:]
 			for llmResponse, err := range aggregator.ProcessResponse(ctx, resp) {
 				if !yield(llmResponse, err) {
@@ -203,10 +203,6 @@ func (m *MockModel) GenerateStream(ctx context.Context, req *model.LLMRequest) i
 // Name implements llm.Model.
 func (m *MockModel) Name() string {
 	return "mock"
-}
-
-func (m *MockModel) Connect(ctx context.Context, req *model.LLMRequest) (model.LiveConnection, error) {
-	return nil, nil
 }
 
 var _ model.LLM = (*MockModel)(nil)

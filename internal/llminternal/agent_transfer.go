@@ -65,6 +65,7 @@ import (
 //
 // TODO: implement it in the runners package and update this doc.
 
+// AgentTransferRequestProcessor processes agent transfer requests.
 func AgentTransferRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		// TODO: support agent types other than LLMAgent, that have parent/subagents?
@@ -82,13 +83,13 @@ func AgentTransferRequestProcessor(ctx agent.InvocationContext, req *model.LLMRe
 
 		// TODO(hyangah): why do we set this up in request processor
 		// instead of registering this as a normal function tool of the Agent?
-		transferToAgentTool := &TransferToAgentTool{}
-		si, err := instructionsForTransferToAgent(agent, parents[agent.Name()], targets, transferToAgentTool)
+		transferToAgentTool, err := NewTransferToAgentTool(agent, parents[agent.Name()], targets)
 		if err != nil {
 			yield(nil, err)
 			return
 		}
-		utils.AppendInstructions(req, si)
+
+		utils.AppendInstructions(req, transferToAgentTool.instructions)
 
 		tools := []tool.Tool{transferToAgentTool}
 		// Only sub-agents (those with a parent) get task_completed.
@@ -97,42 +98,32 @@ func AgentTransferRequestProcessor(ctx agent.InvocationContext, req *model.LLMRe
 			tools = append(tools, &TaskCompletedTool{})
 		}
 		err = appendTools(req, tools...)
+
 		if err != nil {
 			yield(nil, err)
 		}
 	}
 }
 
-// TaskCompletedTool signals to the RunLive loop that the agent has finished its
-// task and the session should terminate cleanly without reconnection.
-type TaskCompletedTool struct{}
+const transferAgentName = "transfer_to_agent"
 
-func (t *TaskCompletedTool) Name() string { return "task_completed" }
-
-func (t *TaskCompletedTool) Description() string {
-	return "Call this when you have fully completed the user's request. This ends the session cleanly."
+// TransferToAgentTool is a tool that handles transferring control to another agent.
+type TransferToAgentTool struct {
+	instructions    string
+	supportedAgents []agent.Agent
 }
 
-func (t *TaskCompletedTool) IsLongRunning() bool { return false }
-
-func (t *TaskCompletedTool) Declaration() *genai.FunctionDeclaration {
-	return &genai.FunctionDeclaration{
-		Name:        t.Name(),
-		Description: t.Description(),
+// NewTransferToAgentTool creates a new TransferToAgentTool.
+func NewTransferToAgentTool(curAgent, parent agent.Agent, targets []agent.Agent) (*TransferToAgentTool, error) {
+	si, err := instructionsForTransferToAgent(curAgent, parent, targets)
+	if err != nil {
+		return nil, err
 	}
+	return &TransferToAgentTool{
+		instructions:    si,
+		supportedAgents: targets,
+	}, nil
 }
-
-func (t *TaskCompletedTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
-	return appendTools(req, t)
-}
-
-func (t *TaskCompletedTool) Run(ctx tool.Context, args any) (map[string]any, error) {
-	return map[string]any{}, nil
-}
-
-var _ tool.Tool = (*TaskCompletedTool)(nil)
-
-type TransferToAgentTool struct{}
 
 // Description implements tool.Tool.
 func (t *TransferToAgentTool) Description() string {
@@ -142,7 +133,7 @@ This tool hands off control to another agent when it's more suitable to answer t
 
 // Name implements tool.Tool.
 func (t *TransferToAgentTool) Name() string {
-	return "transfer_to_agent"
+	return transferAgentName
 }
 
 // IsLongRunning implements tool.Tool.
@@ -155,16 +146,25 @@ func (t *TransferToAgentTool) Declaration() *genai.FunctionDeclaration {
 		Name:        t.Name(),
 		Description: t.Description(),
 		Parameters: &genai.Schema{
-			Type: "object",
+			Type: genai.TypeObject,
 			Properties: map[string]*genai.Schema{
 				"agent_name": {
-					Type:        "string",
+					Type:        genai.TypeString,
 					Description: "the agent name to transfer to",
+					Enum:        t.enums(),
 				},
 			},
 			Required: []string{"agent_name"},
 		},
 	}
+}
+
+func (t *TransferToAgentTool) enums() []string {
+	var agentNames []string
+	for _, a := range t.supportedAgents {
+		agentNames = append(agentNames, a.Name())
+	}
+	return agentNames
 }
 
 // ProcessRequest implements types.Tool.
@@ -237,7 +237,7 @@ func shouldUseAutoFlow(agent agent.Agent) bool {
 	return len(agent.SubAgents()) != 0 || !a.internal().DisallowTransferToParent || !a.internal().DisallowTransferToPeers
 }
 
-// AppendTools appends the tools to the request.
+// appendTools appends the tools to the request.
 // Appending duplicate tools or nameless tools is an error.
 func appendTools(r *model.LLMRequest, tools ...tool.Tool) error {
 	if r.Tools == nil {
@@ -290,7 +290,7 @@ func appendTools(r *model.LLMRequest, tools ...tool.Tool) error {
 var transferToAgentPromptTmpl = template.Must(
 	template.New("transfer_to_agent_prompt").Parse(agentTransferInstructionTemplate))
 
-func instructionsForTransferToAgent(curAgent, parent agent.Agent, targets []agent.Agent, transferTool tool.Tool) (string, error) {
+func instructionsForTransferToAgent(curAgent, parent agent.Agent, targets []agent.Agent) (string, error) {
 	if asLLMAgent(curAgent).internal().DisallowTransferToParent {
 		parent = nil
 	}
@@ -306,7 +306,7 @@ func instructionsForTransferToAgent(curAgent, parent agent.Agent, targets []agen
 		AgentName:        curAgent.Name(),
 		Parent:           parent,
 		Targets:          targets,
-		ToolName:         transferTool.Name(),
+		ToolName:         transferAgentName,
 		FormattedTargets: formatTargets(targets),
 	}); err != nil {
 		return "", err
@@ -351,3 +351,32 @@ call.
 {{if .Parent}}
 If neither you nor the other agents are best for the question, transfer to your parent agent {{.Parent.Name}}.
 {{end}}`
+
+// TaskCompletedTool signals to the RunLive loop that the agent has finished its
+// task and the session should terminate cleanly without reconnection.
+type TaskCompletedTool struct{}
+
+func (t *TaskCompletedTool) Name() string { return "task_completed" }
+
+func (t *TaskCompletedTool) Description() string {
+	return "Call this when you have fully completed the user's request. This ends the session cleanly."
+}
+
+func (t *TaskCompletedTool) IsLongRunning() bool { return false }
+
+func (t *TaskCompletedTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{
+		Name:        t.Name(),
+		Description: t.Description(),
+	}
+}
+
+func (t *TaskCompletedTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
+	return appendTools(req, t)
+}
+
+func (t *TaskCompletedTool) Run(ctx tool.Context, args any) (map[string]any, error) {
+	return map[string]any{}, nil
+}
+
+var _ tool.Tool = (*TaskCompletedTool)(nil)

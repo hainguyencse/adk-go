@@ -16,17 +16,17 @@ package llminternal
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"iter"
+	"log"
 	"maps"
-	"net"
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
-	"github.com/a2aproject/a2a-go/log"
 	"github.com/google/uuid"
 	"google.golang.org/genai"
 
@@ -71,7 +71,6 @@ type Flow struct {
 	BeforeToolCallbacks   []BeforeToolCallback
 	AfterToolCallbacks    []AfterToolCallback
 	OnToolErrorCallbacks  []OnToolErrorCallback
-	AudioCacheManager     *AudioCacheManager
 }
 
 var (
@@ -118,405 +117,412 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 				return
 			}
 			if lastEvent.LLMResponse.Partial {
-				// The last event is a partial streaming response (e.g., reached
-				// max token limit during streaming, or a sub-agent emitted
-				// partial events). The turn is complete so we simply return
-				// instead of looping again.
+				// We may have reached max token limit during streaming mode.
+				// TODO: handle Partial response in model level. CL 781377328
+				yield(nil, fmt.Errorf("TODO: last event is not final"))
 				return
 			}
 		}
 	}
 }
 
-type liveResult struct {
-	event     *session.Event
-	err       error
-	reconnect bool
+type activeTask struct {
+	callID string
+	cancel context.CancelFunc
 }
 
-func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+type liveSessionImpl struct {
+	inputCh     chan agent.LiveRequest
+	outputCh    chan eventOrError
+	done        chan struct{}
+	closeOnce   sync.Once
+	audioMgr    *AudioCacheManager
+	mu          sync.Mutex
+	activeTools map[string][]activeTask
+}
+
+func (s *liveSessionImpl) RegisterStreamingTool(toolName, callID string, cancel context.CancelFunc) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.activeTools == nil {
+		s.activeTools = make(map[string][]activeTask)
+	}
+	s.activeTools[toolName] = append(s.activeTools[toolName], activeTask{
+		callID: callID,
+		cancel: cancel,
+	})
+}
+
+func (s *liveSessionImpl) UnregisterStreamingTool(toolName, callID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tasks, exists := s.activeTools[toolName]
+	if !exists {
+		return
+	}
+	for i, task := range tasks {
+		if task.callID == callID {
+			s.activeTools[toolName] = append(tasks[:i], tasks[i+1:]...)
+			break
+		}
+	}
+	if len(s.activeTools[toolName]) == 0 {
+		delete(s.activeTools, toolName)
+	}
+}
+
+func (s *liveSessionImpl) CancelAllStreamingTools(toolName string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tasks, exists := s.activeTools[toolName]
+	if !exists || len(tasks) == 0 {
+		return false
+	}
+	for _, task := range tasks {
+		task.cancel()
+	}
+	delete(s.activeTools, toolName)
+	return true
+}
+
+type eventOrError struct {
+	event *session.Event
+	err   error
+}
+
+func newLiveSessionImpl() *liveSessionImpl {
+	return &liveSessionImpl{
+		inputCh:  make(chan agent.LiveRequest),
+		outputCh: make(chan eventOrError),
+		done:     make(chan struct{}),
+		audioMgr: NewAudioCacheManager(),
+	}
+}
+
+func (s *liveSessionImpl) Send(req agent.LiveRequest) error {
+	select {
+	case s.inputCh <- req:
+		return nil
+	case <-s.done:
+		return io.EOF
+	}
+}
+
+func (s *liveSessionImpl) recvIter() iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		if f.Model == nil {
-			yield(nil, fmt.Errorf("agent %q: %w", ctx.Agent().Name(), ErrModelNotConfigured))
-			return
+		for {
+			select {
+			case res := <-s.outputCh:
+				if !yield(res.event, res.err) {
+					return
+				}
+			case <-s.done:
+				return
+			}
 		}
+	}
+}
 
-		req := &model.LLMRequest{
+func (s *liveSessionImpl) Close() error {
+	s.closeOnce.Do(func() {
+		close(s.done)
+	})
+	return nil
+}
+
+func (s *liveSessionImpl) pushEvent(ev *session.Event) bool {
+	select {
+	case s.outputCh <- eventOrError{event: ev}:
+		return true
+	case <-s.done:
+		return false
+	}
+}
+
+func (s *liveSessionImpl) pushError(err error) bool {
+	select {
+	case s.outputCh <- eventOrError{err: err}:
+		return true
+	case <-s.done:
+		return false
+	}
+}
+
+func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+	clientProvider, ok := f.Model.(interface {
+		Client() *genai.Client
+	})
+	if !ok {
+		return nil, nil, fmt.Errorf("model does not support live connection")
+	}
+	client := clientProvider.Client()
+
+	runCfg := runconfig.FromContext(ctx)
+	if runCfg == nil || runCfg.Live == nil {
+		return nil, nil, fmt.Errorf("live run config not found")
+	}
+
+	sess := newLiveSessionImpl()
+
+	go func() {
+		defer func() {
+			_ = sess.Close()
+		}()
+
+		nreq := &model.LLMRequest{
 			Model: f.Model.Name(),
-			// clone to new LiveConnectConfig.
-			// runconfig.FromContext(ctx).LiveConnectConfig is ptr
-			// Flow:
-			// -  rootAgent: new LLMRequest with LiveConnectConfig[1]
-			// -> subAgent: change LiveConnectConfig from ctx and attach to create new LLMRequest [2]. At this step LiveConnectConfig[1] will be modified
-			// -> rootAgent when subAgent done and transfer back to rootAgent LiveConnectConfig[1] is modified.
-			// Solution: should clone new config instead of pass by ref
-			LiveConnectConfig: clone(runconfig.FromContext(ctx).LiveConnectConfig),
 		}
-
-		// Preprocess before calling the LLM.
-		for ev, err := range f.preprocess(ctx, req) {
+		for ev, err := range f.preprocess(ctx, nreq) {
 			if err != nil {
-				yield(nil, err)
+				sess.pushError(err)
 				return
 			}
 			if ev != nil {
-				if !yield(ev, nil) {
+				if !sess.pushEvent(ev) {
 					return
 				}
 			}
 		}
-		if ctx.Ended() {
-			return
+
+		liveConnectConfig := &genai.LiveConnectConfig{
+			ResponseModalities:       runCfg.Live.ResponseModalities,
+			SpeechConfig:             runCfg.Live.SpeechConfig,
+			SystemInstruction:        nreq.Config.SystemInstruction,
+			Tools:                    nreq.Config.Tools,
+			SessionResumption:        runCfg.Live.SessionResumption,
+			InputAudioTranscription:  runCfg.Live.InputAudioTranscription,
+			OutputAudioTranscription: runCfg.Live.OutputAudioTranscription,
 		}
 
-		// TODO: Enable Resumability when disconnect suddendly
+		isResumable := func(err error) bool {
+			if err == nil {
+				return false
+			}
+			if err == io.EOF {
+				return true
+			}
+			errStr := err.Error()
+			return strings.Contains(errStr, "broken pipe") ||
+				strings.Contains(errStr, "connection reset") ||
+				strings.Contains(errStr, "EOF") ||
+				strings.Contains(errStr, "1008") ||
+				strings.Contains(errStr, "GoAway")
+		}
 
-		log.Info(ctx, "Flow.RunLive start", "agent", ctx.Agent().Name(), "branch", ctx.Branch())
-		attempt := 1
-		needsContentRefresh := false
+		iCtx, isIContext := ctx.(*icontext.InvocationContext)
+
 		for {
-			if needsContentRefresh && ctx.LiveSessionResumptionHandle() == "" {
-				if err := rebuildContents(ctx, req); err != nil {
-					yield(nil, err)
+			if isIContext {
+				handle := iCtx.LiveSessionResumptionHandle()
+				if handle != "" {
+					if liveConnectConfig.SessionResumption == nil {
+						liveConnectConfig.SessionResumption = &genai.SessionResumptionConfig{}
+					}
+					liveConnectConfig.SessionResumption.Handle = handle
+					if googlellm.GetGoogleLLMVariant(f.Model) == genai.BackendVertexAI {
+						liveConnectConfig.SessionResumption.Transparent = true
+					}
+				}
+			}
+
+			connCtx, cancelConn := context.WithCancel(ctx)
+
+			if liveConnectConfig.SessionResumption != nil {
+				log.Printf("connecting with live session handle: %s\n", liveConnectConfig.SessionResumption.Handle)
+			}
+			liveSession, err := client.Live.Connect(connCtx, f.Model.Name(), liveConnectConfig)
+			if err != nil {
+				cancelConn()
+				log.Printf("failed to connect live session: %v\n", err)
+				sess.pushError(fmt.Errorf("failed to connect live session: %w", err))
+				return
+			}
+
+			liveConn := googlellm.NewLiveConnection(liveSession, f.Model.Name(), googlellm.GetGoogleLLMVariant(f.Model))
+
+			cleanup := func() {
+				cancelConn()
+				_ = liveConn.Close()
+			}
+
+			eventsChan := make(chan *session.Event)
+			errChan := make(chan error)
+
+			// Send preprocessed content directly to model if any exists after early preprocessing
+			if len(nreq.Contents) > 0 {
+				if err := liveConn.SendHistory(ctx, nreq.Contents); err != nil {
+					log.Printf("failed to send history: %v\n", err)
+					sess.pushError(err)
 					return
 				}
 			}
-			needsContentRefresh = false
-			// Handle resumption connection
-			if handle := ctx.LiveSessionResumptionHandle(); handle != "" {
-				log.Info(ctx, "Resuming live session", "handle", handle, "attempt", attempt)
-				attempt += 1
 
-				if req.LiveConnectConfig == nil {
-					req.LiveConnectConfig = &genai.LiveConnectConfig{}
-				}
-				if req.LiveConnectConfig.SessionResumption == nil {
-					req.LiveConnectConfig.SessionResumption = &genai.SessionResumptionConfig{}
-				}
-				req.LiveConnectConfig.SessionResumption.Handle = handle
-				req.LiveConnectConfig.SessionResumption.Transparent = true
-			}
-
-			if len(req.Config.Tools) > 0 {
-				req.LiveConnectConfig.Tools = req.Config.Tools
-			}
-
-			liveConn, err := f.Model.Connect(ctx, req)
-			if err != nil {
-				yield(nil, err)
-				return
-			}
-
-			var closeOnce sync.Once
-			closeSession := func() {
-				closeOnce.Do(func() {
-					liveConn.Close()
-				})
-			}
-
-			// Ensure session is always closed when this iteration exits.
-			defer closeSession()
-
-			err = liveConn.SendHistory(req.Contents)
-			if err != nil {
-				yield(nil, err)
-				return
-			}
-
-			// Live message send from receiver
-			liveCh := make(chan liveResult, 1)
-			// Next Agent Name to Transfer
-			type transferInfo struct {
-				agentName string
-			}
-			transferAgentCh := make(chan transferInfo, 1)
-			// Signals GoAway-initiated graceful close → reconnect with saved handle
-			reconnectCh := make(chan struct{}, 1)
-			// Signals task_completed tool response → terminate RunLive permanently
-			taskCompletedCh := make(chan struct{}, 1)
-			// Use to wait receiver messages process done before transfer to next agent
-			receiverDone := make(chan struct{})
-
-			goAwayReceived := false
-
-			// Receiver
+			// Reading from model loop
 			go func() {
-				defer close(receiverDone)
-
-				resps, errs := liveConn.Receive(ctx)
 				for {
-					select {
-					case llmResponse, ok := <-resps:
-						if !ok {
-							resps = nil // disable this case; wait for errs or ctx.Done()
-							continue
-						}
-
-						if llmResponse.LiveSessionResumptionUpdate != nil {
-							ctx.SetLiveSessionResumptionHandle(llmResponse.LiveSessionResumptionUpdate.NewHandle)
-						}
-
-						if llmResponse.LiveGoAway != nil {
-							goAwayReceived = true
-						}
-
-						// TODO: Enable Resumability when disconnect suddendly
-
-						modelResponseEvent := session.NewEvent(ctx.InvocationID())
-						modelResponseEvent.Content = llmResponse.Content
-						modelResponseEvent.Author = f.getAuthorForEvent(ctx, llmResponse)
-						modelResponseEvent.OutputTranscription = llmResponse.OutputTranscription
-						modelResponseEvent.InputTranscription = llmResponse.InputTranscription
-
-						for ev, err := range f.postprocessLive(ctx, req, llmResponse, modelResponseEvent) {
-							if err != nil {
-								liveCh <- liveResult{err: err}
-								return
-							}
-
-							if ctx.RunConfig().SaveLiveBlob &&
-								ev.Content != nil &&
-								ev.Content.Parts != nil &&
-								ev.Content.Parts[0].InlineData != nil &&
-								strings.HasPrefix(ev.Content.Parts[0].InlineData.MIMEType, "audio/") {
-
-								audioBlob := &genai.Blob{
-									Data:     ev.Content.Parts[0].InlineData.Data,
-									MIMEType: ev.Content.Parts[0].InlineData.MIMEType,
-								}
-
-								if err := f.AudioCacheManager.CacheAudio(ctx, audioBlob, "output"); err != nil {
-									// TODO: handle error
-								}
-							}
-
-							liveCh <- liveResult{event: ev}
-
-							// Function Response must response to LLM via LiveRequestQueue
-							// Send back to queue to make sure correct order of events.
-							// For example:
-							// - Function Call output -> Function Response -> LLM
-							// - App can manually send Function Response -> LLM
-							if hasFunctionResponse(ev.Content) && !hasTaskCompleted(ev.Content) {
-								ctx.LiveRequestQueue().SendContent(ev.Content)
-							}
-
-							if hasTaskCompleted(ev.Content) {
-								taskCompletedCh <- struct{}{}
-								return
-							}
-
-							// Transfer to agent function response
-							if ev.Content != nil && ev.Content.Parts != nil && len(ev.Content.Parts) > 0 && ev.Content.Parts[0].FunctionResponse != nil && ev.Content.Parts[0].FunctionResponse.Name == "transfer_to_agent" {
-								if ev != nil && ev.Actions.TransferToAgent != "" {
-									info := transferInfo{agentName: ev.Actions.TransferToAgent}
-									transferAgentCh <- info
-									return
-								}
-							}
-						}
-
-						// TODO: Enable Resumability when disconnect suddendly
-
-						if ctx.Err() != nil {
-							return
-						}
-
-					case err, ok := <-errs:
-						if !ok {
-							if goAwayReceived && ctx.LiveSessionResumptionHandle() != "" {
-								reconnectCh <- struct{}{}
-							}
-							return
-						}
-						if err != nil {
-							// After GoAway, any connection close is the expected server-initiated
-							// shutdown — reconnect transparently instead of surfacing an error.
-							if goAwayReceived && ctx.LiveSessionResumptionHandle() != "" {
-								reconnectCh <- struct{}{}
-								return
-							}
-							if errors.Is(err, net.ErrClosed) {
-								return
-							}
-							liveCh <- liveResult{err: err}
-							return
-						}
-
-					case <-ctx.Done():
+					resp, err := liveConn.Recv(connCtx)
+					if err != nil {
+						errChan <- err
 						return
 					}
-
+					if resp != nil {
+						if resp.SessionResumptionHandle != "" {
+							if isIContext {
+								log.Printf("received session resumption handle: %s\n", resp.SessionResumptionHandle)
+								iCtx.SetLiveSessionResumptionHandle(resp.SessionResumptionHandle)
+							}
+						}
+						if runCfg.Live.SaveLiveBlob && resp.Content != nil {
+							for _, part := range resp.Content.Parts {
+								if part.InlineData != nil {
+									sess.audioMgr.CacheOutput(part.InlineData.Data, part.InlineData.MIMEType)
+								}
+							}
+						}
+						ev := session.NewEvent(ctx.InvocationID())
+						ev.Author = ctx.Agent().Name()
+						ev.LLMResponse = *resp
+						select {
+						case eventsChan <- ev:
+						case <-connCtx.Done():
+							return
+						}
+					}
 				}
 			}()
 
-			// Sender
-		sendLoop:
-			for {
-				liveRequestQueue := ctx.LiveRequestQueue()
-				select {
-				case <-ctx.Done():
-					return
-
-					// LLM Event -> app: InputTranscription, OutputTranscription, FunctionCall, FunctionResponse
-				case result := <-liveCh:
-					if result.err != nil {
-						yield(nil, result.err)
+			// Sending to model loop
+			go func() {
+				for {
+					select {
+					case <-connCtx.Done():
 						return
-					}
-
-					if result.event != nil {
-						if !yield(result.event, nil) {
+					case req, ok := <-sess.inputCh:
+						if !ok {
 							return
 						}
-					}
-
-				case info := <-transferAgentCh: // Transfer to next agent
-					// Close current session and wait for goroutine to exit.
-					closeSession()
-					<-receiverDone
-
-					// The receiver sends the function response event to liveCh before
-					// signaling transferAgentCh. If select picked transferAgentCh first,
-					// that event is still buffered — drain it so it gets saved to the session.
-				drainLiveCh:
-					for {
-						select {
-						case result := <-liveCh:
-							if result.err != nil {
-								yield(nil, result.err)
-								return
-							}
-							if result.event != nil {
-								if !yield(result.event, nil) {
-									return
-								}
-							}
-						default:
-							break drainLiveCh
-						}
-					}
-
-					// Clear the resumption handle: the session it belonged to is now
-					// closed, and the next agent has different tools/instructions so
-					// it must start a fresh Gemini Live session.
-					ctx.SetLiveSessionResumptionHandle("")
-
-					nextAgent := f.agentToRun(ctx, info.agentName)
-					if nextAgent == nil {
-						yield(nil, fmt.Errorf("failed to find agent: %s", info.agentName))
-						return
-					}
-
-					// Run sub-agent on the main goroutine. The iterator function
-					// stays alive, so the caller keeps sending to liveRequestQueue.
-					for ev, err := range nextAgent.RunLive(ctx) {
-						if !yield(ev, err) || err != nil {
-							return
-						}
-					}
-					// Each agent owns its own LiveConnectConfig copy
-					// so sub-agents cannot contaminate this agent's SystemInstruction.
-					// Clear the resumption handle left by sub-agents so this agent starts a
-					// fresh Gemini Live session, not a continuation of the sub-agent's session.
-					ctx.SetLiveSessionResumptionHandle("")
-					if req.LiveConnectConfig != nil {
-						req.LiveConnectConfig.SessionResumption = nil
-					}
-					needsContentRefresh = true
-					break sendLoop
-
-				case <-taskCompletedCh:
-					closeSession()
-					<-receiverDone
-
-					// Drain any pending event (e.g., the task_completed function response)
-					// for the same reason as the transferAgentCh drain above.
-				drainLiveChTaskCompleted:
-					for {
-						select {
-						case result := <-liveCh:
-							if result.err != nil {
-								yield(nil, result.err)
-								return
-							}
-							if result.event != nil {
-								if !yield(result.event, nil) {
-									return
-								}
-							}
-						default:
-							break drainLiveChTaskCompleted
-						}
-					}
-					return
-
-				case <-reconnectCh:
-					log.Info(ctx, "Reconnect session")
-					closeSession()
-					<-receiverDone
-					break sendLoop
-
-					// User Event -> LiveRequestQueue -> LLM
-				case liveReq, ok := <-liveRequestQueue.Chan():
-					if !ok || liveReq.Close {
-						return
-					}
-
-					if liveReq.Realtime != nil {
-						if ctx.RunConfig().SaveLiveBlob &&
-							liveReq.Realtime.Audio != nil &&
-							strings.HasPrefix(liveReq.Realtime.Audio.MIMEType, "audio/") {
-							err := f.AudioCacheManager.CacheAudio(ctx, liveReq.Realtime.Audio, "input")
-							if err != nil {
-								// TODO: handle error
-							}
-						}
-
-						err = liveConn.SendRealtime(liveReq.Realtime)
-						if err != nil {
-							yield(nil, err)
-							return
-						}
-					}
-
-					if liveReq.Content != nil {
-						// Match Python's _send_to_model: persist user text content
-						// to the session so that sub-agents see it after transfer.
-						// Skip function responses - they are handled separately.
-						isFuncResp := false
-						for _, p := range liveReq.Content.Parts {
-							if p.FunctionResponse != nil {
-								isFuncResp = true
-								break
-							}
-						}
-
-						if !isFuncResp {
-							if liveReq.Content.Role == "" {
-								liveReq.Content.Role = "user"
-							}
-							userEvent := session.NewEvent(ctx.InvocationID())
-							userEvent.Author = "user"
-							userEvent.Branch = ctx.Branch()
-							userEvent.LLMResponse = model.LLMResponse{
-								Content: liveReq.Content,
-							}
-							if !yield(userEvent, nil) {
+						if req.Content != nil {
+							if err := liveConn.SendContent(connCtx, req.Content); err != nil {
+								errChan <- err
 								return
 							}
 						}
-
-						err := liveConn.SendContent(liveReq.Content)
-						if err != nil {
-							yield(nil, err)
-							return
+						if req.RealtimeInput != nil {
+							if blob, ok := req.RealtimeInput.(*genai.Blob); ok {
+								sess.audioMgr.CacheInput(blob.Data, blob.MIMEType)
+							}
+							if err := liveConn.SendRealtime(connCtx, req.RealtimeInput); err != nil {
+								errChan <- err
+								return
+							}
 						}
 					}
 				}
+			}()
+
+			reconnect := false
+			for !reconnect {
+				select {
+				case ev := <-eventsChan:
+					if !sess.pushEvent(ev) {
+						cleanup()
+						return
+					}
+					// Flush caches if needed
+					if runCfg.Live.SaveLiveBlob {
+						var flushUser, flushModel bool
+						if ev.LLMResponse.Interrupted {
+							flushModel = true
+						}
+						if ev.LLMResponse.TurnComplete {
+							flushUser = true
+							flushModel = true
+						}
+						if flushUser || flushModel {
+							flushedEvents, err := sess.audioMgr.FlushCaches(ctx, flushUser, flushModel)
+							if err != nil {
+								sess.pushError(err)
+								cleanup()
+								return
+							}
+							for _, fev := range flushedEvents {
+								if !sess.pushEvent(fev) {
+									cleanup()
+									return
+								}
+							}
+						}
+					}
+					// Handle function calls if present in the event
+					fnCalls := utils.FunctionCalls(ev.LLMResponse.Content)
+					if len(fnCalls) > 0 {
+						tools := make(map[string]tool.Tool)
+						for _, t := range f.Tools {
+							tools[t.Name()] = t
+						}
+						respEv, err := f.handleFunctionCalls(ctx, tools, &ev.LLMResponse, nil, sess)
+						if err != nil {
+							sess.pushError(err)
+							cleanup()
+							return
+						}
+						if respEv != nil {
+							if !sess.pushEvent(respEv) {
+								cleanup()
+								return
+							}
+							// Check if task_completed was invoked.
+							var isTaskCompleted bool
+							if respEv.LLMResponse.Content != nil {
+								for _, part := range respEv.LLMResponse.Content.Parts {
+									if part.FunctionResponse != nil && part.FunctionResponse.Name == "task_completed" {
+										isTaskCompleted = true
+										break
+									}
+								}
+							}
+							if isTaskCompleted {
+								time.Sleep(100 * time.Millisecond)
+								cleanup()
+								return
+							}
+							// Send function response back to model
+							if err := liveConn.SendContent(connCtx, respEv.LLMResponse.Content); err != nil {
+								sess.pushError(err)
+								cleanup()
+								return
+							}
+						}
+					}
+				case err := <-errChan:
+					if isResumable(err) {
+						log.Printf("Connection error, attempting to resume: %v\n", err)
+						reconnect = true
+						break // Break the select
+					}
+					sess.pushError(err)
+					cleanup()
+					return
+				case <-ctx.Done():
+					sess.pushError(ctx.Err())
+					cleanup()
+					return
+				}
+				if reconnect {
+					break // Break the for loop
+				}
+			}
+
+			// Cleanup before reconnecting
+			cleanup()
+
+			if !reconnect {
+				break
 			}
 		}
-	}
+	}()
+
+	return sess, sess.recvIter(), nil
 }
 
 func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
@@ -573,6 +579,7 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 					if !yield(nil, fmt.Errorf("unexpected tool type %T for tool %v", v, k)) {
 						return
 					}
+					continue
 				}
 				tools[k] = tool
 			}
@@ -584,8 +591,12 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			}
 			// TODO: generate and yield an auth event if needed.
 
+			if resp.Partial {
+				continue
+			}
 			// Handle function calls.
-			ev, err := f.handleFunctionCalls(ctx, tools, resp.LLMResponse, nil)
+
+			ev, err := f.handleFunctionCalls(ctx, tools, resp.LLMResponse, nil, nil)
 			if err != nil {
 				yield(nil, err)
 				return
@@ -596,14 +607,17 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			}
 
 			toolConfirmationEvent := generateRequestConfirmationEvent(ctx, modelResponseEvent, ev)
+
+			// Yield function responses before confirmation requests so consumers that
+			// pause for user approval still persist completed tool results.
+			if !yield(ev, nil) {
+				return
+			}
+
 			if toolConfirmationEvent != nil {
 				if !yield(toolConfirmationEvent, nil) {
 					return
 				}
-			}
-
-			if !yield(ev, nil) {
-				return
 			}
 
 			// If the model response is structured, yield it as a final model response event.
@@ -654,95 +668,13 @@ func (f *Flow) preprocess(ctx agent.InvocationContext, req *model.LLMRequest) it
 			}
 		}
 
-		if f.Tools != nil {
-			if err := toolPreprocess(ctx, req, f.Tools); err != nil {
-				yield(nil, err)
-			}
-		}
-	}
-}
-
-func (f *Flow) postprocessLive(ctx agent.InvocationContext, llmRequest *model.LLMRequest, llmResponse *model.LLMResponse, modelResponseEvent *session.Event) iter.Seq2[*session.Event, error] {
-	return func(yield func(*session.Event, error) bool) {
-		responseWithEventID := newResponseWithEventID(llmResponse)
-		if err := f.postprocess(ctx, llmRequest, responseWithEventID); err != nil {
+		if err := toolPreprocess(ctx, req, f.Tools); err != nil {
 			yield(nil, err)
 			return
 		}
-
-		if llmResponse.Content == nil &&
-			llmResponse.ErrorCode == "" &&
-			!llmResponse.Interrupted &&
-			!llmResponse.TurnComplete &&
-			llmResponse.InputTranscription == nil &&
-			llmResponse.OutputTranscription == nil &&
-			llmResponse.UsageMetadata == nil {
+		if err := toolsetPreprocess(ctx, req); err != nil {
+			yield(nil, err)
 			return
-		}
-
-		if llmResponse.InputTranscription != nil {
-			modelResponseEvent.InputTranscription = llmResponse.InputTranscription
-			modelResponseEvent.Partial = llmResponse.Partial
-			yield(modelResponseEvent, nil)
-			return
-		}
-
-		if llmResponse.OutputTranscription != nil {
-			modelResponseEvent.OutputTranscription = llmResponse.OutputTranscription
-			modelResponseEvent.Partial = llmResponse.Partial
-			yield(modelResponseEvent, nil)
-			return
-		}
-
-		// Flush audio caches based on control events using configurable settings
-		if ctx.RunConfig().SaveLiveBlob {
-			flushedEvents := f.handleControlEventFlush(ctx, llmResponse)
-			for _, ev := range flushedEvents {
-				if !yield(ev, nil) {
-					return
-				}
-			}
-
-			// if len(flushedEvents) > 0 {
-			// 	// NOTE below return is O.K. for now, because currently we only flush
-			// 	// events on interrupted or turn_complete. turn_complete is a pure
-			// 	// control event and interrupted is not with content but those content
-			// 	// is ignorable because model is already interrupted. If we have other
-			// 	// case to flush events in the future that are not pure control events,
-			// 	// we should not return here.
-			// 	return
-			// }
-		}
-
-		// Resolve tools
-		tools := make(map[string]tool.Tool)
-		for k, v := range llmRequest.Tools {
-			tool, ok := v.(tool.Tool)
-			if !ok {
-				yield(nil, fmt.Errorf("unexpected tool type %T for tool %v", v, k))
-				return
-			}
-			tools[k] = tool
-		}
-
-		stateDelta := make(map[string]any)
-		newResponseWithEventID := newResponseWithEventID(llmResponse)
-		newModelResponseEvent := f.finalizeModelResponseEvent(ctx, newResponseWithEventID, tools, stateDelta)
-		if !yield(newModelResponseEvent, nil) {
-			return
-		}
-
-		if len(newModelResponseEvent.FunctionCalls()) > 0 {
-			functionResponseEvent, err := f.handleFunctionCalls(ctx, tools, llmResponse, nil)
-			if err != nil {
-				yield(nil, err)
-				return
-			}
-			if functionResponseEvent != nil {
-				if !yield(functionResponseEvent, nil) {
-					return
-				}
-			}
 		}
 	}
 }
@@ -760,6 +692,24 @@ func toolPreprocess(ctx agent.InvocationContext, req *model.LLMRequest, tools []
 		toolCtx := toolinternal.NewToolContext(ctx, "", &session.EventActions{}, nil)
 		if err := requestProcessor.ProcessRequest(toolCtx, req); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func toolsetPreprocess(ctx agent.InvocationContext, req *model.LLMRequest) error {
+	llmAgent, ok := ctx.Agent().(Agent)
+	if !ok {
+		return nil
+	}
+	for _, toolset := range Reveal(llmAgent).Toolsets {
+		processor, ok := toolset.(toolinternal.RequestProcessor)
+		if !ok {
+			continue // Not all toolsets implement RequestProcessor.
+		}
+		toolCtx := toolinternal.NewToolContext(ctx, "", nil, nil)
+		if err := processor.ProcessRequest(toolCtx, req); err != nil {
+			return fmt.Errorf("process request by toolset %q: %w", toolset.Name(), err)
 		}
 	}
 	return nil
@@ -795,8 +745,7 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 		// to help with slicing the billing reports on a per-agent basis.
 
 		// TODO: RunLive mode when invocation_context.run_config.support_cfc is true.
-		streamingMode := runconfig.FromContext(ctx).StreamingMode
-		useStream := streamingMode == runconfig.StreamingModeSSE
+		useStream := runconfig.FromContext(ctx).StreamingMode == runconfig.StreamingModeSSE
 
 		for resp, err := range generateContent(ctx, f.Model, req, useStream) {
 			if err != nil {
@@ -959,33 +908,6 @@ func (f *Flow) postprocess(ctx agent.InvocationContext, req *model.LLMRequest, r
 	return nil
 }
 
-// hasTaskCompleted returns true if content contains a task_completed function response,
-// which signals the RunLive loop to terminate cleanly without reconnection.
-func hasTaskCompleted(content *genai.Content) bool {
-	if content == nil {
-		return false
-	}
-	for _, p := range content.Parts {
-		if p.FunctionResponse != nil && p.FunctionResponse.Name == "task_completed" {
-			return true
-		}
-	}
-	return false
-}
-
-// hasFunctionResponse returns true if the content contains at least one FunctionResponse part.
-func hasFunctionResponse(content *genai.Content) bool {
-	if content == nil {
-		return false
-	}
-	for _, p := range content.Parts {
-		if p.FunctionResponse != nil {
-			return true
-		}
-	}
-	return false
-}
-
 func (f *Flow) agentToRun(ctx agent.InvocationContext, agentName string) agent.Agent {
 	// NOTE: in python, BaseLlmFlow._get_agent_to_run searches the entire agent
 	// tree from the root_agent when processing _postprocess_handle_function_calls_async.
@@ -1062,21 +984,35 @@ Suggested fixes:
   - Check for typos in function name`, toolName, joinedTools)
 }
 
-// toolCallCacheKey generates a stable cache key from branch, tool name, and args.
-// encoding/json marshals map[string]any keys in sorted order, giving a canonical representation.
-func toolCallCacheKey(branch, toolName string, args map[string]any) string {
-	argsJSON, _ := json.Marshal(args)
-	return fmt.Sprintf("branch:%s:tool_name:%s:args:%s", branch, toolName, argsJSON)
+type cancelledToolContext struct {
+	tool.Context
+	cancelCtx context.Context
+}
+
+func (c *cancelledToolContext) Done() <-chan struct{} {
+	return c.cancelCtx.Done()
+}
+
+func (c *cancelledToolContext) Err() error {
+	return c.cancelCtx.Err()
+}
+
+func (c *cancelledToolContext) Deadline() (deadline time.Time, ok bool) {
+	return c.cancelCtx.Deadline()
+}
+
+func (c *cancelledToolContext) Value(key any) any {
+	return c.cancelCtx.Value(key)
 }
 
 // handleFunctionCalls calls the functions and returns the function response event.
 //
 // TODO: accept filters to include/exclude function calls.
 // TODO: check feasibility of running tool.Run concurrently.
-func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[string]tool.Tool, resp *model.LLMResponse, toolConfirmations map[string]*toolconfirmation.ToolConfirmation) (mergedEvent *session.Event, err error) {
-	var fnResponseEvents []*session.Event
+func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[string]tool.Tool, resp *model.LLMResponse, toolConfirmations map[string]*toolconfirmation.ToolConfirmation, liveSess agent.LiveSession) (mergedEvent *session.Event, err error) {
 	fnCalls := utils.FunctionCalls(resp.Content)
 	toolNames := slices.Collect(maps.Keys(toolsDict))
+
 	// Merged span for parallel tool calls - create only if there is more than one tool call.
 	if len(fnCalls) > 1 {
 		mergedCtx, mergedToolCallSpan := telemetry.StartTrace(ctx, "execute_tool (merged)")
@@ -1086,9 +1022,15 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 			mergedToolCallSpan.End()
 		}()
 	}
-	for _, fnCall := range fnCalls {
-		// Wrap function calls in anonymous func to limit the scope of the span.
-		func() {
+
+	fnResponseEvents := make([]*session.Event, len(fnCalls))
+	var wg sync.WaitGroup
+
+	for i, fnCall := range fnCalls {
+		wg.Add(1)
+		go func(i int, fnCall *genai.FunctionCall) {
+			defer wg.Done()
+
 			sctx, span := telemetry.StartExecuteToolSpan(ctx, telemetry.StartExecuteToolSpanParams{
 				ToolName: fnCall.Name,
 				Args:     fnCall.Args,
@@ -1101,24 +1043,90 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 			}
 			toolCtx := toolinternal.NewToolContext(toolCallCtx, fnCall.ID, &session.EventActions{StateDelta: make(map[string]any)}, confirmation)
 
-			curTool, found := toolsDict[fnCall.Name]
-
 			var result map[string]any
-			var cacheHit bool
-			if !found {
-				err := newToolNotFoundError(fnCall.Name, toolNames)
-				result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, fnCall.Args, err)
-				if err != nil {
-					result = map[string]any{"error": err.Error()}
+			var curTool tool.Tool
+			if fnCall.Name == "stop_streaming" {
+				funcToStop, _ := fnCall.Args["function_name"].(string)
+				var status string
+				if impl, ok := liveSess.(*liveSessionImpl); ok && impl.CancelAllStreamingTools(funcToStop) {
+					status = fmt.Sprintf("Successfully stopped all running instances of %s", funcToStop)
+				} else {
+					status = fmt.Sprintf("No active streaming function named %s found", funcToStop)
 				}
-			} else if funcTool, ok := curTool.(toolinternal.FunctionTool); !ok {
-				err := newToolNotFoundError(fnCall.Name, toolNames)
-				result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, fnCall.Args, err)
-				if err != nil {
-					result = map[string]any{"error": err.Error()}
-				}
+				result = map[string]any{"status": status}
 			} else {
-				result, cacheHit = f.callTool(ctx, toolCtx, funcTool, fnCall.Args)
+				var found bool
+				curTool, found = toolsDict[fnCall.Name]
+				if !found {
+					err := newToolNotFoundError(fnCall.Name, toolNames)
+					result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, fnCall.Args, err)
+					if err != nil {
+						result = map[string]any{"error": err.Error()}
+					}
+				} else if streamTool, ok := curTool.(toolinternal.StreamingFunctionTool); ok {
+					if liveSess != nil {
+						result = map[string]any{"status": "The function is running asynchronously and the results are pending."}
+						cancelCtx, cancel := context.WithCancel(toolCtx)
+						cancelToolCtx := &cancelledToolContext{
+							Context:   toolCtx,
+							cancelCtx: cancelCtx,
+						}
+						if impl, ok := liveSess.(*liveSessionImpl); ok {
+							impl.RegisterStreamingTool(streamTool.Name(), fnCall.ID, cancel)
+						}
+						go func() {
+							defer func() {
+								if impl, ok := liveSess.(*liveSessionImpl); ok {
+									impl.UnregisterStreamingTool(streamTool.Name(), fnCall.ID)
+								}
+								cancel()
+							}()
+							for chunk, err := range streamTool.RunStream(cancelToolCtx, fnCall.Args) {
+								select {
+								case <-cancelCtx.Done():
+									return
+								default:
+								}
+								if err != nil {
+									fmt.Printf("Error in streaming tool %s: %v\n", streamTool.Name(), err)
+									return
+								}
+								updatedContent := &genai.Content{
+									Role: "user",
+									Parts: []*genai.Part{
+										{
+											Text: fmt.Sprintf("Function %s returned: %s", streamTool.Name(), chunk),
+										},
+									},
+								}
+								if err := liveSess.Send(agent.LiveRequest{Content: updatedContent}); err != nil {
+									fmt.Printf("Failed to send content from streaming tool %s: %v\n", streamTool.Name(), err)
+									return
+								}
+							}
+						}()
+					} else {
+						var sb strings.Builder
+						for chunk, err := range streamTool.RunStream(toolCtx, fnCall.Args) {
+							if err != nil {
+								result = map[string]any{"error": err.Error()}
+								break
+							}
+							sb.WriteString(chunk)
+						}
+						if result == nil {
+							result = map[string]any{"result": sb.String()}
+						}
+					}
+				} else if funcTool, ok := curTool.(toolinternal.FunctionTool); !ok {
+					err := newToolNotFoundError(fnCall.Name, toolNames)
+					result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, fnCall.Args, err)
+					if err != nil {
+						result = map[string]any{"error": err.Error()}
+					}
+				} else {
+					result = f.callTool(toolCtx, funcTool, fnCall.Args)
+				}
 			}
 
 			// TODO: handle long-running tool.
@@ -1141,14 +1149,6 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 			ev.Branch = ctx.Branch()
 			ev.Actions = *toolCtx.Actions()
 
-			if cacheHit {
-				if ev.CustomMetadata == nil {
-					ev.CustomMetadata = map[string]any{}
-				}
-
-				ev.CustomMetadata["adk_tool_call_cache_hit"] = true
-			}
-
 			traceTool := curTool
 			if traceTool == nil {
 				traceTool = &fakeTool{name: fnCall.Name}
@@ -1168,9 +1168,10 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 				Error:         toolErr,
 			})
 
-			fnResponseEvents = append(fnResponseEvents, ev)
-		}()
+			fnResponseEvents[i] = ev
+		}(i, fnCall)
 	}
+	wg.Wait()
 	mergedEvent, err = mergeParallelFunctionResponseEvents(fnResponseEvents)
 	if err != nil {
 		return mergedEvent, err
@@ -1189,7 +1190,7 @@ func (f *Flow) runOnToolErrorCallbacks(toolCtx tool.Context, tool tool.Tool, fAr
 	return f.invokeOnToolErrorCallbacks(toolCtx, tool, fArgs, err)
 }
 
-func (f *Flow) executeToolPipeline(toolCtx tool.Context, tool toolinternal.FunctionTool, fArgs map[string]any) map[string]any {
+func (f *Flow) callTool(toolCtx tool.Context, tool toolinternal.FunctionTool, fArgs map[string]any) map[string]any {
 	var response map[string]any
 	var err error
 	pluginManager := pluginManagerFromContext(toolCtx)
@@ -1234,27 +1235,6 @@ func (f *Flow) executeToolPipeline(toolCtx tool.Context, tool toolinternal.Funct
 		return map[string]any{"error": err.Error()}
 	}
 	return response
-}
-
-func (f *Flow) callTool(invocationCtx agent.InvocationContext, toolCtx tool.Context, tool toolinternal.FunctionTool, fArgs map[string]any) (funcResp map[string]any, hit bool) {
-	shouldDeDup := (invocationCtx.RunConfig() != nil && invocationCtx.RunConfig().DedupeToolCalls) || tool.IsLongRunning()
-	if shouldDeDup {
-		cacheKey := toolCallCacheKey(invocationCtx.Branch(), tool.Name(), fArgs)
-
-		defer func() {
-			if funcResp != nil {
-				invocationCtx.SetCachedToolResponse(toolCtx, cacheKey, funcResp)
-			}
-		}()
-
-		funcResp, hit = invocationCtx.GetCachedToolResponse(toolCtx, cacheKey)
-		if hit {
-			return
-		}
-	}
-
-	funcResp = f.executeToolPipeline(toolCtx, tool, fArgs)
-	return
 }
 
 func (f *Flow) invokeBeforeToolCallbacks(toolCtx tool.Context, tool tool.Tool, fArgs map[string]any) (map[string]any, error) {
@@ -1360,60 +1340,6 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 		maps.Copy(base.RequestedToolConfirmations, other.RequestedToolConfirmations)
 	}
 	return base
-}
-
-// handleControlEventFlush flushes audio caches based on control events using configurable settings
-func (f *Flow) handleControlEventFlush(ctx agent.InvocationContext, llmResponse *model.LLMResponse) []*session.Event {
-	if llmResponse.Interrupted {
-		events, err := f.AudioCacheManager.FlushCaches(ctx, false, true)
-		if err != nil {
-			// TODO: handle error
-		}
-		return events
-	} else if llmResponse.TurnComplete {
-		events, err := f.AudioCacheManager.FlushCaches(ctx, true, true)
-		if err != nil {
-			// TODO: handle error
-		}
-		return events
-	}
-
-	// TODO: Once generation_complete is surfaced on LlmResponse, we can flush
-	// model audio here (flush_user_audio=False, flush_model_audio=True).
-	return nil
-}
-
-func (f *Flow) getAuthorForEvent(ctx agent.InvocationContext, llmResponse *model.LLMResponse) string {
-	if llmResponse != nil && llmResponse.Content != nil && llmResponse.Content.Role == "user" {
-		return "user"
-	}
-
-	return ctx.Agent().Name()
-}
-
-// rebuildContents rebuilds req.Contents from the current session events.
-// Called after a sub-agent returns so the parent resumes with full context.
-func rebuildContents(ctx agent.InvocationContext, req *model.LLMRequest) error {
-	llmAgent := asLLMAgent(ctx.Agent())
-	if llmAgent == nil {
-		return nil
-	}
-	fn := buildContentsDefault
-	if llmAgent.internal().IncludeContents == "none" {
-		fn = buildContentsCurrentTurnContextOnly
-	}
-	var events []*session.Event
-	if ctx.Session() != nil {
-		for e := range ctx.Session().Events().All() {
-			events = append(events, e)
-		}
-	}
-	contents, err := fn(ctx.Agent().Name(), ctx.Branch(), events)
-	if err != nil {
-		return err
-	}
-	req.Contents = contents
-	return nil
 }
 
 func deepMergeMap(dst, src map[string]any) map[string]any {

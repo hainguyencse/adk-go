@@ -52,25 +52,6 @@ func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f
 
 		// TODO: missing features
 		//  populate LLMRequest LiveConnectConfig setting
-		// req.LiveConnectConfig = clone(state.LiveConnectConfig)
-		if req.LiveConnectConfig == nil {
-			req.LiveConnectConfig = &genai.LiveConnectConfig{}
-		}
-
-		if len(req.LiveConnectConfig.ResponseModalities) == 0 {
-			req.LiveConnectConfig.ResponseModalities = []genai.Modality{genai.ModalityAudio}
-		}
-
-		if req.LiveConnectConfig.SpeechConfig == nil {
-			req.LiveConnectConfig.SpeechConfig = &genai.SpeechConfig{
-				LanguageCode: "en-US",
-				VoiceConfig: &genai.VoiceConfig{
-					PrebuiltVoiceConfig: &genai.PrebuiltVoiceConfig{
-						VoiceName: "Aoede",
-					},
-				},
-			}
-		}
 	}
 }
 

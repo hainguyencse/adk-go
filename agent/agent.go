@@ -44,8 +44,9 @@ type Agent interface {
 	Name() string
 	Description() string
 	Run(InvocationContext) iter.Seq2[*session.Event, error]
-	RunLive(InvocationContext) iter.Seq2[*session.Event, error]
 	SubAgents() []Agent
+	FindAgent(name string) Agent
+	FindSubAgent(name string) Agent
 
 	internal() *agent
 }
@@ -65,7 +66,6 @@ func New(cfg Config) (Agent, error) {
 		subAgents:            cfg.SubAgents,
 		beforeAgentCallbacks: cfg.BeforeAgentCallbacks,
 		run:                  cfg.Run,
-		runLive:              cfg.RunLive,
 		afterAgentCallbacks:  cfg.AfterAgentCallbacks,
 		State: agentinternal.State{
 			AgentType: agentinternal.TypeCustomAgent,
@@ -97,8 +97,6 @@ type Config struct {
 	BeforeAgentCallbacks []BeforeAgentCallback
 	// Run is the function that defines the agent's behavior.
 	Run func(InvocationContext) iter.Seq2[*session.Event, error]
-	// RunLive is the function that defines the agent's behavior for live requests.
-	RunLive func(InvocationContext) iter.Seq2[*session.Event, error]
 	// AfterAgentCallbacks is a list of callbacks that are called sequentially
 	// after the agent has completed its run.
 	//
@@ -120,14 +118,8 @@ type Artifacts interface {
 // Memory interface provides methods to access agent memory across the
 // sessions of the current user_id.
 type Memory interface {
-	AddSession(context.Context, session.Session) error
-	Search(ctx context.Context, query string) (*memory.SearchResponse, error)
-}
-
-// ToolResponseCache interface provides methods to access cached tool responses of the current session
-type ToolResponseCache interface {
-	Get(ctx context.Context, key string) (map[string]any, bool)
-	Set(ctx context.Context, key string, value map[string]any)
+	AddSessionToMemory(context.Context, session.Session) error
+	SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error)
 }
 
 // BeforeAgentCallback is a function that is called before the agent starts
@@ -152,7 +144,6 @@ type agent struct {
 
 	beforeAgentCallbacks []BeforeAgentCallback
 	run                  func(InvocationContext) iter.Seq2[*session.Event, error]
-	runLive              func(InvocationContext) iter.Seq2[*session.Event, error]
 	afterAgentCallbacks  []AfterAgentCallback
 }
 
@@ -191,8 +182,6 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			userContent:   ctx.UserContent(),
 			runConfig:     ctx.RunConfig(),
 			endInvocation: ctx.Ended(),
-
-			toolResponseCache: ctx.ToolResponseCache(),
 		}
 		event, err := runBeforeAgentCallbacks(ctx)
 		if event != nil || err != nil {
@@ -225,60 +214,24 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 	}
 }
 
-func (a *agent) RunLive(ctx InvocationContext) iter.Seq2[*session.Event, error] {
-	return func(yield func(*session.Event, error) bool) {
-		ctx := &invocationContext{
-			Context:                     ctx,
-			agent:                       a,
-			artifacts:                   ctx.Artifacts(),
-			memory:                      ctx.Memory(),
-			session:                     ctx.Session(),
-			invocationID:                ctx.InvocationID(),
-			branch:                      ctx.Branch(),
-			userContent:                 ctx.UserContent(),
-			runConfig:                   ctx.RunConfig(),
-			endInvocation:               ctx.Ended(),
-			liveRequestQueue:            ctx.LiveRequestQueue(),
-			resumabilityConfig:          ctx.ResumabilityConfig(),
-			liveSessionResumptionHandle: ctx.LiveSessionResumptionHandle(),
-			transcriptionCache:          ctx.TranscriptionCache(),
-			inputRealtimeCache:          ctx.InputRealtimeCache(),
-			outputRealtimeCache:         ctx.OutputRealtimeCache(),
-			toolResponseCache:           ctx.ToolResponseCache(),
-		}
-		event, err := runBeforeAgentCallbacks(ctx)
-		if event != nil || err != nil {
-			if !yield(event, err) {
-				return
-			}
-		}
-
-		if ctx.Ended() {
-			return
-		}
-
-		for event, err := range a.runLive(ctx) {
-			if event != nil && event.Author == "" {
-				event.Author = getAuthorForEvent(ctx, event)
-			}
-			if !yield(event, err) {
-				return
-			}
-		}
-
-		if ctx.Ended() {
-			return
-		}
-
-		event, err = runAfterAgentCallbacks(ctx)
-		if event != nil || err != nil {
-			yield(event, err)
-		}
-	}
-}
-
 func (a *agent) internal() *agent {
 	return a
+}
+
+func (a *agent) FindAgent(name string) Agent {
+	if a.Name() == name {
+		return a
+	}
+	return a.FindSubAgent(name)
+}
+
+func (a *agent) FindSubAgent(name string) Agent {
+	for _, subAgent := range a.SubAgents() {
+		if result := subAgent.FindAgent(name); result != nil {
+			return result
+		}
+	}
+	return nil
 }
 
 func getAuthorForEvent(ctx InvocationContext, event *session.Event) string {
@@ -493,24 +446,16 @@ func (c *callbackContextState) All() iter.Seq2[string, any] {
 type invocationContext struct {
 	context.Context
 
-	agent             Agent
-	artifacts         Artifacts
-	memory            Memory
-	toolResponseCache ToolResponseCache
-	session           session.Session
+	agent     Agent
+	artifacts Artifacts
+	memory    Memory
+	session   session.Session
 
 	invocationID  string
 	branch        string
 	userContent   *genai.Content
 	runConfig     *RunConfig
 	endInvocation bool
-
-	liveRequestQueue            *LiveRequestQueue
-	transcriptionCache          []TranscriptionEntry
-	inputRealtimeCache          []RealtimeCacheEntry
-	outputRealtimeCache         []RealtimeCacheEntry
-	resumabilityConfig          *ResumabilityConfig
-	liveSessionResumptionHandle string
 }
 
 func (c *invocationContext) Agent() Agent {
@@ -557,71 +502,6 @@ func (c *invocationContext) WithContext(ctx context.Context) InvocationContext {
 	newCtx := *c
 	newCtx.Context = ctx
 	return &newCtx
-}
-
-func (c *invocationContext) TranscriptionCache() []TranscriptionEntry {
-	return c.transcriptionCache
-}
-
-func (c *invocationContext) LiveSessionResumptionHandle() string {
-	return c.liveSessionResumptionHandle
-}
-
-func (c *invocationContext) InputRealtimeCache() []RealtimeCacheEntry {
-	return c.inputRealtimeCache
-}
-
-func (c *invocationContext) OutputRealtimeCache() []RealtimeCacheEntry {
-	return c.outputRealtimeCache
-}
-
-func (c *invocationContext) ResumabilityConfig() *ResumabilityConfig {
-	return c.resumabilityConfig
-}
-
-func (c *invocationContext) AppendInputRealtimeCache(entry RealtimeCacheEntry) {
-	c.inputRealtimeCache = append(c.inputRealtimeCache, entry)
-}
-
-func (c *invocationContext) AppendOutputRealtimeCache(entry RealtimeCacheEntry) {
-	c.outputRealtimeCache = append(c.outputRealtimeCache, entry)
-}
-
-func (c *invocationContext) ClearInputRealtimeCache() {
-	c.inputRealtimeCache = nil
-}
-
-func (c *invocationContext) ClearOutputRealtimeCache() {
-	c.outputRealtimeCache = nil
-}
-
-func (c *invocationContext) SetLiveSessionResumptionHandle(handle string) {
-	c.liveSessionResumptionHandle = handle
-}
-
-func (c *invocationContext) LiveRequestQueue() *LiveRequestQueue {
-	return c.liveRequestQueue
-}
-
-func (c *invocationContext) ToolResponseCache() ToolResponseCache {
-	return c.toolResponseCache
-}
-
-func (c *invocationContext) GetCachedToolResponse(ctx context.Context, key string) (map[string]any, bool) {
-	if c.toolResponseCache == nil {
-		return nil, false
-	}
-
-	result, ok := c.toolResponseCache.Get(ctx, key)
-	return result, ok
-}
-
-func (c *invocationContext) SetCachedToolResponse(ctx context.Context, key string, result map[string]any) {
-	if c.toolResponseCache == nil {
-		return
-	}
-
-	c.toolResponseCache.Set(ctx, key, result)
 }
 
 func pluginManagerFromContext(ctx context.Context) pluginManager {

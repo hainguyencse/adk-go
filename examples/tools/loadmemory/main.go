@@ -40,7 +40,7 @@ import (
 func main() {
 	ctx := context.Background()
 
-	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{
+	model, err := gemini.NewModel(ctx, "gemini-3.1-flash-lite", &genai.ClientConfig{
 		APIKey: os.Getenv("GOOGLE_API_KEY"),
 	})
 	if err != nil {
@@ -76,7 +76,7 @@ func main() {
 	}
 
 	// Add the previous session to memory so it can be searched.
-	if err := memoryService.AddSession(ctx, previousSession); err != nil {
+	if err := memoryService.AddSessionToMemory(ctx, previousSession); err != nil {
 		log.Fatalf("Failed to add session to memory: %v", err)
 	}
 

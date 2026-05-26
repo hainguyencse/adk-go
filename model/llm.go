@@ -26,15 +26,13 @@ import (
 type LLM interface {
 	Name() string
 	GenerateContent(ctx context.Context, req *LLMRequest, stream bool) iter.Seq2[*LLMResponse, error]
-	Connect(ctx context.Context, req *LLMRequest) (LiveConnection, error)
 }
 
 // LLMRequest is the raw LLM request.
 type LLMRequest struct {
-	Model             string
-	Contents          []*genai.Content
-	Config            *genai.GenerateContentConfig
-	LiveConnectConfig *genai.LiveConnectConfig
+	Model    string
+	Contents []*genai.Content
+	Config   *genai.GenerateContentConfig
 
 	Tools map[string]any `json:"-"`
 }
@@ -42,13 +40,15 @@ type LLMRequest struct {
 // LLMResponse is the raw LLM response.
 // It provides the first candidate response from the model if available.
 type LLMResponse struct {
-	Content           *genai.Content
-	CitationMetadata  *genai.CitationMetadata
-	GroundingMetadata *genai.GroundingMetadata
-	UsageMetadata     *genai.GenerateContentResponseUsageMetadata
-	CustomMetadata    map[string]any
-	LogprobsResult    *genai.LogprobsResult
-	ModelVersion      string
+	Content             *genai.Content
+	CitationMetadata    *genai.CitationMetadata
+	GroundingMetadata   *genai.GroundingMetadata
+	UsageMetadata       *genai.GenerateContentResponseUsageMetadata
+	CustomMetadata      map[string]any
+	LogprobsResult      *genai.LogprobsResult
+	InputTranscription  *genai.Transcription
+	OutputTranscription *genai.Transcription
+	ModelVersion        string
 	// Partial indicates whether the content is part of a unfinished content stream.
 	// Only used for streaming mode and when the content is plain text.
 	// The Runner fully processes only the final non-partial event, partial
@@ -59,36 +59,10 @@ type LLMResponse struct {
 	TurnComplete bool
 	// Flag indicating that LLM was interrupted when generating the content.
 	// Usually it is due to user interruption during a bidi streaming.
-	Interrupted  bool
-	ErrorCode    string
-	ErrorMessage string
-	FinishReason genai.FinishReason
-	AvgLogprobs  float64
-
-	LiveSessionResumptionUpdate *genai.LiveServerSessionResumptionUpdate
-
-	// Audio transcription of user input (from Gemini Live API).
-	InputTranscription *genai.Transcription
-	// Audio transcription of model output (from Gemini Live API).
-	OutputTranscription *genai.Transcription
-	LiveGoAway          *genai.LiveServerGoAway
-}
-
-// LiveRequest is the request to be sent to the model in the live stream.
-type LiveRequest struct {
-	Content       *genai.Content
-	RealtimeInput *genai.LiveRealtimeInput
-	ToolResponse  *genai.LiveToolResponseInput
-	ActivityStart *genai.ActivityStart
-	ActivityEnd   *genai.ActivityEnd
-	Close         bool
-}
-
-// LiveConnection represents a bidirectional streaming connection to the LLM.
-type LiveConnection interface {
-	SendHistory(contents []*genai.Content) error
-	SendContent(content *genai.Content) error
-	SendRealtime(input *genai.LiveRealtimeInput) error
-	Receive(ctx context.Context) (<-chan *LLMResponse, <-chan error)
-	Close() error
+	Interrupted             bool
+	SessionResumptionHandle string
+	ErrorCode               string
+	ErrorMessage            string
+	FinishReason            genai.FinishReason
+	AvgLogprobs             float64
 }
