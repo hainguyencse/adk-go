@@ -415,8 +415,13 @@ func (m *MockInvocationContext) OutputRealtimeCache() []agent.RealtimeCacheEntry
 func (m *MockInvocationContext) ResumabilityConfig() *agent.ResumabilityConfig            { return nil }
 func (m *MockInvocationContext) LiveRequestQueue() *agent.LiveRequestQueue                { return nil }
 func (m *MockInvocationContext) TranscriptionCache() []agent.TranscriptionEntry           { return nil }
-func (m *MockInvocationContext) GetCachedToolCall(key string) (map[string]any, bool)       { return nil, false }
-func (m *MockInvocationContext) SetCachedToolCall(key string, result map[string]any)       {}
+func (m *MockInvocationContext) ToolResponseCache() agent.ToolResponseCache               { return nil }
+func (m *MockInvocationContext) GetCachedToolResponse(ctx context.Context, key string) (map[string]any, bool) {
+	return nil, false
+}
+func (m *MockInvocationContext) SetCachedToolResponse(ctx context.Context, key string, result map[string]any) {
+	return
+}
 
 // MockCallbackContext
 type MockCallbackContext struct {
