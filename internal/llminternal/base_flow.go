@@ -194,7 +194,11 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 					req.LiveConnectConfig.SessionResumption = &genai.SessionResumptionConfig{}
 				}
 				req.LiveConnectConfig.SessionResumption.Handle = handle
-				req.LiveConnectConfig.SessionResumption.Transparent = true
+				// Only set Transparent for Vertex AI; the Gemini API backend
+				// explicitly rejects it.
+				if googlellm.GetGoogleLLMVariant(f.Model) == genai.BackendVertexAI {
+					req.LiveConnectConfig.SessionResumption.Transparent = true
+				}
 			}
 
 			if len(req.Config.Tools) > 0 {
