@@ -32,15 +32,23 @@ func (m *geminiModel) Connect(ctx context.Context, req *model.LLMRequest) (model
 	}
 
 	return &liveConnection{
-		session: session,
+		session:   session,
+		modelName: m.name,
 	}, nil
 }
 
 type liveConnection struct {
-	session *genai.Session
+	session   *genai.Session
+	modelName string
 
 	inputTranscriptionText  string
 	outputTranscriptionText string
+}
+
+// isGemini31FlashLive returns true if the model is a Gemini 3.1 Flash Live model.
+// Mirrors Python's model_name_utils.is_gemini_3_1_flash_live.
+func isGemini31FlashLive(modelName string) bool {
+	return strings.HasPrefix(modelName, "gemini-3.1-flash-live")
 }
 
 func (c *liveConnection) SendHistory(contents []*genai.Content) error {
@@ -104,6 +112,11 @@ func (c *liveConnection) SendContent(content *genai.Content) error {
 				FunctionResponses: functionResponses,
 			})
 		} else {
+			if isGemini31FlashLive(c.modelName) && len(content.Parts) == 1 && content.Parts[0].Text != "" {
+				return c.session.SendRealtimeInput(genai.LiveSendRealtimeInputParameters{
+					Text: content.Parts[0].Text,
+				})
+			}
 			turnComplete := true
 			return c.session.SendClientContent(genai.LiveClientContentInput{
 				Turns:        []*genai.Content{content},
@@ -121,6 +134,19 @@ func (c *liveConnection) SendRealtime(input *genai.LiveRealtimeInput) error {
 	}
 
 	if input.Media != nil {
+		if isGemini31FlashLive(c.modelName) {
+			if strings.HasPrefix(input.Media.MIMEType, "audio/") {
+				return c.session.SendRealtimeInput(genai.LiveSendRealtimeInputParameters{
+					Audio: input.Media,
+				})
+			} else if strings.HasPrefix(input.Media.MIMEType, "image/") {
+				return c.session.SendRealtimeInput(genai.LiveSendRealtimeInputParameters{
+					Video: input.Media,
+				})
+			}
+			// Unknown or empty MIME type — skip (matches Python warning behavior).
+			return nil
+		}
 		return c.session.SendRealtimeInput(genai.LiveSendRealtimeInputParameters{
 			Media: input.Media,
 		})
@@ -197,6 +223,7 @@ func (c *liveConnection) process(ctx context.Context, in <-chan *genai.LiveServe
 		}
 
 		var text string
+		var toolCallParts []*genai.Part
 		for {
 			select {
 			case msg, ok := <-in:
@@ -346,6 +373,14 @@ func (c *liveConnection) process(ctx context.Context, in <-chan *genai.LiveServe
 							}
 							text = ""
 						}
+						if len(toolCallParts) > 0 {
+							if !send(&model.LLMResponse{
+								Content: &genai.Content{Role: "model", Parts: toolCallParts},
+							}) {
+								return
+							}
+							toolCallParts = nil
+						}
 						if !send(&model.LLMResponse{
 							TurnComplete: true,
 							Interrupted:  msg.ServerContent.Interrupted,
@@ -375,20 +410,27 @@ func (c *liveConnection) process(ctx context.Context, in <-chan *genai.LiveServe
 				}
 
 				if msg.ToolCall != nil {
-					resp := &model.LLMResponse{}
-					// Map ToolCall to model.LLMResponse content parts
-					parts := make([]*genai.Part, 0)
+					if text != "" {
+						if !send(c.buildFullTextResponse(text)) {
+							return
+						}
+						text = ""
+					}
 					for _, fc := range msg.ToolCall.FunctionCalls {
-						parts = append(parts, &genai.Part{
-							FunctionCall: fc,
-						})
+						toolCallParts = append(toolCallParts, &genai.Part{FunctionCall: fc})
 					}
-					if resp.Content == nil {
-						resp.Content = &genai.Content{Role: "model"}
-					}
-					resp.Content.Parts = append(resp.Content.Parts, parts...)
-					if !send(resp) {
-						return
+					// Gemini 3.1 does not emit turn_complete until it receives the
+					// tool response, so yield tool calls immediately to avoid
+					// deadlocking the conversation. Other models (e.g. 2.5-pro,
+					// native-audio) send turn_complete after tool calls, so buffer
+					// and merge them into a single response at turn_complete.
+					if isGemini31FlashLive(c.modelName) && len(toolCallParts) > 0 {
+						if !send(&model.LLMResponse{
+							Content: &genai.Content{Role: "model", Parts: toolCallParts},
+						}) {
+							return
+						}
+						toolCallParts = nil
 					}
 				}
 
