@@ -350,14 +350,14 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 							// an intermittent connection drop (e.g. "The operation was cancelled").
 							// Reconnect transparently with the session handle, mirroring Python's
 							// handling of ConnectionClosedOK / APIError codes 1000 and 1006.
-							if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseAbnormalClosure) &&
-								ctx.LiveSessionResumptionHandle() != "" {
+							if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseAbnormalClosure) && ctx.LiveSessionResumptionHandle() != "" {
 								if attempt > maxLiveReconnectAttempts {
 									log.Error(ctx, "Max reconnection attempts reached", err, "attempt", attempt)
 									liveCh <- liveResult{err: err}
 									return
 								}
-								log.Info(ctx, "Connection lost, reconnecting with session handle", "err", err, "attempt", attempt)
+
+								log.Info(ctx, "Connection lost, reconnecting with session handle", "attempt", attempt)
 								reconnectCh <- struct{}{}
 								return
 							}
