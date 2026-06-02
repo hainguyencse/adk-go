@@ -28,6 +28,7 @@ import (
 
 	"github.com/a2aproject/a2a-go/log"
 	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -46,6 +47,9 @@ import (
 )
 
 var ErrModelNotConfigured = errors.New("model not configured; ensure Model is set in llmagent.Config")
+
+// maxLiveReconnectAttempts mirrors Python's DEFAULT_MAX_RECONNECT_ATTEMPTS.
+const maxLiveReconnectAttempts = 5
 
 type BeforeModelCallback func(ctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error)
 
@@ -337,6 +341,21 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 							// After GoAway, any connection close is the expected server-initiated
 							// shutdown — reconnect transparently instead of surfacing an error.
 							if goAwayReceived && ctx.LiveSessionResumptionHandle() != "" {
+								reconnectCh <- struct{}{}
+								return
+							}
+							// WebSocket close code 1000 (normal) or 1006 (abnormal) indicates
+							// an intermittent connection drop (e.g. "The operation was cancelled").
+							// Reconnect transparently with the session handle, mirroring Python's
+							// handling of ConnectionClosedOK / APIError codes 1000 and 1006.
+							if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseAbnormalClosure) &&
+								ctx.LiveSessionResumptionHandle() != "" {
+								if attempt > maxLiveReconnectAttempts {
+									log.Error(ctx, "Max reconnection attempts reached", err, "attempt", attempt)
+									liveCh <- liveResult{err: err}
+									return
+								}
+								log.Info(ctx, "Connection lost, reconnecting with session handle", "err", err, "attempt", attempt)
 								reconnectCh <- struct{}{}
 								return
 							}
