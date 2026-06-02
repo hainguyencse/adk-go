@@ -255,6 +255,8 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 				for {
 					select {
 					case llmResponse, ok := <-resps:
+						// Reset attempt counter on successful communication.
+						attempt = 1
 						if !ok {
 							resps = nil // disable this case; wait for errs or ctx.Done()
 							continue
