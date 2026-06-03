@@ -357,7 +357,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 									return
 								}
 
-								log.Info(ctx, "Connection lost, reconnecting with session handle", "attempt", attempt)
+								log.Error(ctx, "Connection lost, reconnecting with session handle", err, "attempt", attempt)
 								reconnectCh <- struct{}{}
 								return
 							}
