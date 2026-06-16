@@ -29,6 +29,7 @@ import (
 	"github.com/a2aproject/a2a-go/log"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -247,8 +248,10 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 
 			goAwayReceived := false
 
-			// Receiver
-			go func() {
+			var eg errgroup.Group
+
+			eg.Go(func() error {
+				// Receiver
 				defer close(receiverDone)
 
 				resps, errs := liveConn.Receive(ctx)
@@ -281,7 +284,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 						for ev, err := range f.postprocessLive(ctx, req, llmResponse, modelResponseEvent) {
 							if err != nil {
 								liveCh <- liveResult{err: err}
-								return
+								return nil
 							}
 
 							if ctx.RunConfig().SaveLiveBlob &&
@@ -313,7 +316,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 
 							if hasTaskCompleted(ev.Content) {
 								taskCompletedCh <- struct{}{}
-								return
+								return nil
 							}
 
 							// Transfer to agent function response
@@ -321,7 +324,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 								if ev != nil && ev.Actions.TransferToAgent != "" {
 									info := transferInfo{agentName: ev.Actions.TransferToAgent}
 									transferAgentCh <- info
-									return
+									return nil
 								}
 							}
 						}
@@ -329,7 +332,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 						// TODO: Enable Resumability when disconnect suddendly
 
 						if ctx.Err() != nil {
-							return
+							return nil
 						}
 
 					case err, ok := <-errs:
@@ -337,14 +340,14 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 							if goAwayReceived && ctx.LiveSessionResumptionHandle() != "" {
 								reconnectCh <- struct{}{}
 							}
-							return
+							return nil
 						}
 						if err != nil {
 							// After GoAway, any connection close is the expected server-initiated
 							// shutdown — reconnect transparently instead of surfacing an error.
 							if goAwayReceived && ctx.LiveSessionResumptionHandle() != "" {
 								reconnectCh <- struct{}{}
-								return
+								return nil
 							}
 							// WebSocket close code 1000 (normal) or 1006 (abnormal) indicates
 							// an intermittent connection drop (e.g. "The operation was cancelled").
@@ -354,192 +357,204 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 								if attempt > maxLiveReconnectAttempts {
 									log.Error(ctx, "Max reconnection attempts reached", err, "attempt", attempt)
 									liveCh <- liveResult{err: err}
-									return
+									return nil
 								}
 
 								log.Error(ctx, "Connection lost, reconnecting with session handle", err, "attempt", attempt)
 								reconnectCh <- struct{}{}
-								return
+								return nil
 							}
 							if errors.Is(err, net.ErrClosed) {
-								return
+								return nil
 							}
 							liveCh <- liveResult{err: err}
-							return
+							return nil
 						}
 
 					case <-ctx.Done():
-						return
+						return nil
 					}
 
 				}
-			}()
+			})
 
-			// Sender
-		sendLoop:
-			for {
-				liveRequestQueue := ctx.LiveRequestQueue()
-				select {
-				case <-ctx.Done():
-					return
+			eg.Go(func() error {
+				// Sender
+			sendLoop:
+				for {
+					liveRequestQueue := ctx.LiveRequestQueue()
+					select {
+					case <-ctx.Done():
+						return nil
 
-					// LLM Event -> app: InputTranscription, OutputTranscription, FunctionCall, FunctionResponse
-				case result := <-liveCh:
-					if result.err != nil {
-						yield(nil, result.err)
-						return
-					}
-
-					if result.event != nil {
-						if !yield(result.event, nil) {
-							return
+						// LLM Event -> app: InputTranscription, OutputTranscription, FunctionCall, FunctionResponse
+					case result := <-liveCh:
+						if result.err != nil {
+							yield(nil, result.err)
+							return nil
 						}
-					}
 
-				case info := <-transferAgentCh: // Transfer to next agent
-					// Close current session and wait for goroutine to exit.
-					closeSession()
-					<-receiverDone
-
-					// The receiver sends the function response event to liveCh before
-					// signaling transferAgentCh. If select picked transferAgentCh first,
-					// that event is still buffered — drain it so it gets saved to the session.
-				drainLiveCh:
-					for {
-						select {
-						case result := <-liveCh:
-							if result.err != nil {
-								yield(nil, result.err)
-								return
+						if result.event != nil {
+							if !yield(result.event, nil) {
+								return nil
 							}
-							if result.event != nil {
-								if !yield(result.event, nil) {
-									return
+						}
+
+					case info := <-transferAgentCh: // Transfer to next agent
+						// Close current session and wait for goroutine to exit.
+						closeSession()
+						<-receiverDone
+
+						// The receiver sends the function response event to liveCh before
+						// signaling transferAgentCh. If select picked transferAgentCh first,
+						// that event is still buffered — drain it so it gets saved to the session.
+					drainLiveCh:
+						for {
+							select {
+							case result := <-liveCh:
+								if result.err != nil {
+									yield(nil, result.err)
+									return nil
+								}
+								if result.event != nil {
+									if !yield(result.event, nil) {
+										return nil
+									}
+								}
+							default:
+								break drainLiveCh
+							}
+						}
+
+						// Clear the resumption handle: the session it belonged to is now
+						// closed, and the next agent has different tools/instructions so
+						// it must start a fresh Gemini Live session.
+						ctx.SetLiveSessionResumptionHandle("")
+
+						nextAgent := f.agentToRun(ctx, info.agentName)
+						if nextAgent == nil {
+							yield(nil, fmt.Errorf("failed to find agent: %s", info.agentName))
+							return nil
+						}
+
+						// Run sub-agent on the main goroutine. The iterator function
+						// stays alive, so the caller keeps sending to liveRequestQueue.
+						for ev, err := range nextAgent.RunLive(ctx) {
+							if !yield(ev, err) || err != nil {
+								return nil
+							}
+						}
+						// Each agent owns its own LiveConnectConfig copy
+						// so sub-agents cannot contaminate this agent's SystemInstruction.
+						// Clear the resumption handle left by sub-agents so this agent starts a
+						// fresh Gemini Live session, not a continuation of the sub-agent's session.
+						ctx.SetLiveSessionResumptionHandle("")
+						if req.LiveConnectConfig != nil {
+							req.LiveConnectConfig.SessionResumption = nil
+						}
+						needsContentRefresh = true
+						break sendLoop
+
+					case <-taskCompletedCh:
+						closeSession()
+						<-receiverDone
+
+						// Drain any pending event (e.g., the task_completed function response)
+						// for the same reason as the transferAgentCh drain above.
+					drainLiveChTaskCompleted:
+						for {
+							select {
+							case result := <-liveCh:
+								if result.err != nil {
+									yield(nil, result.err)
+									return nil
+								}
+								if result.event != nil {
+									if !yield(result.event, nil) {
+										return nil
+									}
+								}
+							default:
+								break drainLiveChTaskCompleted
+							}
+						}
+						return nil
+
+					case <-reconnectCh:
+						log.Info(ctx, "Reconnect session")
+						closeSession()
+						<-receiverDone
+						break sendLoop
+
+						// User Event -> LiveRequestQueue -> LLM
+					case liveReq, ok := <-liveRequestQueue.Chan():
+						if !ok || liveReq.Close {
+							return nil
+						}
+
+						if liveReq.Realtime != nil {
+							if ctx.RunConfig().SaveLiveBlob &&
+								liveReq.Realtime.Audio != nil &&
+								strings.HasPrefix(liveReq.Realtime.Audio.MIMEType, "audio/") {
+								err := f.AudioCacheManager.CacheAudio(ctx, liveReq.Realtime.Audio, "input")
+								if err != nil {
+									// TODO: handle error
 								}
 							}
-						default:
-							break drainLiveCh
-						}
-					}
 
-					// Clear the resumption handle: the session it belonged to is now
-					// closed, and the next agent has different tools/instructions so
-					// it must start a fresh Gemini Live session.
-					ctx.SetLiveSessionResumptionHandle("")
-
-					nextAgent := f.agentToRun(ctx, info.agentName)
-					if nextAgent == nil {
-						yield(nil, fmt.Errorf("failed to find agent: %s", info.agentName))
-						return
-					}
-
-					// Run sub-agent on the main goroutine. The iterator function
-					// stays alive, so the caller keeps sending to liveRequestQueue.
-					for ev, err := range nextAgent.RunLive(ctx) {
-						if !yield(ev, err) || err != nil {
-							return
-						}
-					}
-					// Each agent owns its own LiveConnectConfig copy
-					// so sub-agents cannot contaminate this agent's SystemInstruction.
-					// Clear the resumption handle left by sub-agents so this agent starts a
-					// fresh Gemini Live session, not a continuation of the sub-agent's session.
-					ctx.SetLiveSessionResumptionHandle("")
-					if req.LiveConnectConfig != nil {
-						req.LiveConnectConfig.SessionResumption = nil
-					}
-					needsContentRefresh = true
-					break sendLoop
-
-				case <-taskCompletedCh:
-					closeSession()
-					<-receiverDone
-
-					// Drain any pending event (e.g., the task_completed function response)
-					// for the same reason as the transferAgentCh drain above.
-				drainLiveChTaskCompleted:
-					for {
-						select {
-						case result := <-liveCh:
-							if result.err != nil {
-								yield(nil, result.err)
-								return
-							}
-							if result.event != nil {
-								if !yield(result.event, nil) {
-									return
-								}
-							}
-						default:
-							break drainLiveChTaskCompleted
-						}
-					}
-					return
-
-				case <-reconnectCh:
-					log.Info(ctx, "Reconnect session")
-					closeSession()
-					<-receiverDone
-					break sendLoop
-
-					// User Event -> LiveRequestQueue -> LLM
-				case liveReq, ok := <-liveRequestQueue.Chan():
-					if !ok || liveReq.Close {
-						return
-					}
-
-					if liveReq.Realtime != nil {
-						if ctx.RunConfig().SaveLiveBlob &&
-							liveReq.Realtime.Audio != nil &&
-							strings.HasPrefix(liveReq.Realtime.Audio.MIMEType, "audio/") {
-							err := f.AudioCacheManager.CacheAudio(ctx, liveReq.Realtime.Audio, "input")
+							err = liveConn.SendRealtime(liveReq.Realtime)
 							if err != nil {
-								// TODO: handle error
+								yield(nil, err)
+								return nil
 							}
 						}
 
-						err = liveConn.SendRealtime(liveReq.Realtime)
-						if err != nil {
-							yield(nil, err)
-							return
-						}
-					}
+						if liveReq.Content != nil {
+							// Match Python's _send_to_model: persist user text content
+							// to the session so that sub-agents see it after transfer.
+							// Skip function responses - they are handled separately.
+							isFuncResp := false
+							for _, p := range liveReq.Content.Parts {
+								if p.FunctionResponse != nil {
+									isFuncResp = true
+									break
+								}
+							}
 
-					if liveReq.Content != nil {
-						// Match Python's _send_to_model: persist user text content
-						// to the session so that sub-agents see it after transfer.
-						// Skip function responses - they are handled separately.
-						isFuncResp := false
-						for _, p := range liveReq.Content.Parts {
-							if p.FunctionResponse != nil {
-								isFuncResp = true
-								break
+							if !isFuncResp {
+								if liveReq.Content.Role == "" {
+									liveReq.Content.Role = "user"
+								}
+								userEvent := session.NewEvent(ctx.InvocationID())
+								userEvent.Author = "user"
+								userEvent.Branch = ctx.Branch()
+								userEvent.LLMResponse = model.LLMResponse{
+									Content: liveReq.Content,
+								}
+								if !yield(userEvent, nil) {
+									return nil
+								}
 							}
-						}
 
-						if !isFuncResp {
-							if liveReq.Content.Role == "" {
-								liveReq.Content.Role = "user"
+							err := liveConn.SendContent(liveReq.Content)
+							if err != nil {
+								yield(nil, err)
+								return nil
 							}
-							userEvent := session.NewEvent(ctx.InvocationID())
-							userEvent.Author = "user"
-							userEvent.Branch = ctx.Branch()
-							userEvent.LLMResponse = model.LLMResponse{
-								Content: liveReq.Content,
-							}
-							if !yield(userEvent, nil) {
-								return
-							}
-						}
-
-						err := liveConn.SendContent(liveReq.Content)
-						if err != nil {
-							yield(nil, err)
-							return
 						}
 					}
 				}
+
+				return nil
+			})
+
+			errGroup := eg.Wait()
+			if errGroup != nil {
+				yield(nil, errGroup)
+				return
 			}
+
+			return
 		}
 	}
 }
