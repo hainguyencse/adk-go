@@ -215,22 +215,6 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 				return
 			}
 
-			var closeOnce sync.Once
-			closeSession := func() {
-				closeOnce.Do(func() {
-					liveConn.Close()
-				})
-			}
-
-			// Ensure session is always closed when this iteration exits.
-			defer closeSession()
-
-			err = liveConn.SendHistory(req.Contents)
-			if err != nil {
-				yield(nil, err)
-				return
-			}
-
 			// Live message send from receiver
 			liveCh := make(chan liveResult, 1)
 			// Next Agent Name to Transfer
@@ -244,8 +228,21 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 			taskCompletedCh := make(chan struct{}, 1)
 			// Use to wait receiver messages process done before transfer to next agent
 			receiverDone := make(chan struct{})
-
 			goAwayReceived := false
+
+			var closeOnce sync.Once
+			closeSession := func() {
+				closeOnce.Do(func() {
+					liveConn.Close()
+				})
+			}
+
+			err = liveConn.SendHistory(req.Contents)
+			if err != nil {
+				closeSession()
+				yield(nil, err)
+				return
+			}
 
 			// Receiver
 			go func() {
@@ -373,6 +370,12 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 					}
 
 				}
+			}()
+
+			// Ensure session is closed and receiver has exited before this iteration returns.
+			defer func() {
+				closeSession()
+				<-receiverDone
 			}()
 
 			// Sender
