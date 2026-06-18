@@ -416,6 +416,11 @@ func (c *liveConnection) process(ctx context.Context, in <-chan *genai.LiveServe
 						}
 						text = ""
 					}
+					// Discard any pending output transcription — the model was narrating
+					// its intent to call a tool (often emitting the function name as
+					// transcribed audio). Surfacing this to the caller causes the raw
+					// tool name to appear as visible AI text in the UI.
+					c.outputTranscriptionText = ""
 					for _, fc := range msg.ToolCall.FunctionCalls {
 						toolCallParts = append(toolCallParts, &genai.Part{FunctionCall: fc})
 					}
