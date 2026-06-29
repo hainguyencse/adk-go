@@ -117,7 +117,7 @@ func TestLoadSkill(t *testing.T) {
 			{
 				Name:        "skill1",
 				Description: "description1",
-				Metadata: map[string]string{
+				Metadata: map[string]any{
 					"key1": "value1",
 				},
 			},

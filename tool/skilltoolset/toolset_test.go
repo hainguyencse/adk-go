@@ -47,7 +47,7 @@ func TestProcessRequest(t *testing.T) {
 				Name:          "skill1",
 				Description:   "description1",
 				Compatibility: "...",
-				Metadata: map[string]string{
+				Metadata: map[string]any{
 					"flag1": "key1",
 					"flag2": "key2",
 				},

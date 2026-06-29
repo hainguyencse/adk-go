@@ -39,7 +39,7 @@ type Frontmatter struct {
 	Description   string            `yaml:"description"`
 	License       string            `yaml:"license,omitempty"`
 	Compatibility string            `yaml:"compatibility,omitempty"`
-	Metadata      map[string]string `yaml:"metadata,omitempty"`
+	Metadata      map[string]any    `yaml:"metadata,omitempty"`
 	AllowedTools  []string          `yaml:"allowed-tools,omitempty"`
 }
 

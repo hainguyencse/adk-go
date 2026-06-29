@@ -17,11 +17,37 @@ package skilltool
 
 import (
 	"fmt"
+	"slices"
 
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/adk/tool/skilltoolset/skill"
 )
+
+// recordActivation writes skillName into the per-agent activated-skills list in
+// state so that SkillToolset.Tools() can later resolve adk_additional_tools.
+// It silently no-ops when ctx is incomplete (e.g. in unit tests).
+func recordActivation(ctx tool.Context, skillName string) {
+	if ctx == nil {
+		return
+	}
+	// AgentName() may panic when the context has no agent (test-only scenario).
+	var agentName string
+	func() {
+		defer func() { recover() }() //nolint:errcheck
+		agentName = ctx.AgentName()
+	}()
+	if agentName == "" {
+		return
+	}
+	stateKey := fmt.Sprintf("_adk_activated_skill_%s", agentName)
+	existing, _ := ctx.State().Get(stateKey)
+	activated, _ := existing.([]string)
+	if !slices.Contains(activated, skillName) {
+		activated = append(activated, skillName)
+		ctx.State().Set(stateKey, activated) //nolint:errcheck
+	}
+}
 
 // LoadSkillArgs represents the input to load a skill.
 type LoadSkillArgs struct {
@@ -29,12 +55,12 @@ type LoadSkillArgs struct {
 }
 
 type FrontmatterJSON struct {
-	Name          string            `json:"name"`
-	Description   string            `json:"description"`
-	License       string            `json:"license,omitempty"`
-	Compatibility string            `json:"compatibility,omitempty"`
-	Metadata      map[string]string `json:"metadata,omitempty"`
-	AllowedTools  []string          `json:"allowed-tools,omitempty"`
+	Name          string         `json:"name"`
+	Description   string         `json:"description"`
+	License       string         `json:"license,omitempty"`
+	Compatibility string         `json:"compatibility,omitempty"`
+	Metadata      map[string]any `json:"metadata,omitempty"`
+	AllowedTools  []string       `json:"allowed-tools,omitempty"`
 }
 
 // LoadSkillResult represents the output of a loaded skill.
@@ -69,6 +95,10 @@ func loadSkill(ctx tool.Context, args LoadSkillArgs, source skill.Source) (*Load
 	if err != nil {
 		return nil, fmt.Errorf("load instructions for skill %q: %w", args.Name, err)
 	}
+
+	// Record skill activation in agent state so Tools() can resolve additional tools.
+	recordActivation(ctx, args.Name)
+
 	return &LoadSkillResult{
 		SkillName:    args.Name,
 		Instructions: instructions,

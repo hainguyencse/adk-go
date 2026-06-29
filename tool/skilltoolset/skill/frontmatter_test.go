@@ -147,7 +147,7 @@ Body
 			want: &Frontmatter{
 				Name:        "my-cool-skill",
 				Description: "A cool skill.",
-				Metadata: map[string]string{
+				Metadata: map[string]any{
 					"author":  "Cool Author",
 					"version": "1.0.0",
 				},
@@ -301,7 +301,7 @@ func TestBuild(t *testing.T) {
 	frontmatter := &Frontmatter{
 		Name:        "my-skill",
 		Description: "A test skill.",
-		Metadata: map[string]string{
+		Metadata: map[string]any{
 			"author": "Cool Author",
 		},
 		AllowedTools: []string{"tool1", "tool2"},

@@ -107,32 +107,92 @@ func (ts *SkillToolset) Name() string { return ts.name }
 // Tools implements tool.Toolset. It returns all tools: core skill tools,
 // additional tools, and tools from additional toolsets, deduped by name.
 func (ts *SkillToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
-	seen := make(map[string]struct{}, len(ts.tools))
-	all := make([]tool.Tool, 0, len(ts.tools))
-	for _, t := range ts.tools {
-		seen[t.Name()] = struct{}{}
-		all = append(all, t)
+	result := make([]tool.Tool, len(ts.tools))
+	copy(result, ts.tools)
+
+	if ctx == nil {
+		return result, nil
 	}
-	addTool := func(t tool.Tool) {
-		if _, exists := seen[t.Name()]; exists {
-			return
-		}
-		seen[t.Name()] = struct{}{}
-		all = append(all, t)
+
+	additionalToolNames, err := ts.resolveAdditionalToolNamesFromState(ctx)
+	if err != nil {
+		return nil, err
 	}
+	if len(additionalToolNames) == 0 {
+		return result, nil
+	}
+
+	// Build a map of candidate tools from additionalTools and additionalToolsets.
+	candidates := make(map[string]tool.Tool)
 	for _, t := range ts.additionalTools {
-		addTool(t)
+		candidates[t.Name()] = t
 	}
-	for _, ts2 := range ts.additionalToolsets {
-		extra, err := ts2.Tools(ctx)
+	for _, toolset := range ts.additionalToolsets {
+		tsTools, err := toolset.Tools(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("get tools from additional toolset %q: %w", ts2.Name(), err)
+			return nil, fmt.Errorf("get tools from toolset %q: %w", toolset.Name(), err)
 		}
-		for _, t := range extra {
-			addTool(t)
+		for _, t := range tsTools {
+			candidates[t.Name()] = t
 		}
 	}
-	return all, nil
+
+	existing := make(map[string]bool, len(result))
+	for _, t := range result {
+		existing[t.Name()] = true
+	}
+
+	for name := range additionalToolNames {
+		t, ok := candidates[name]
+		if !ok {
+			continue
+		}
+		if existing[t.Name()] {
+			continue
+		}
+		result = append(result, t)
+		existing[t.Name()] = true
+	}
+
+	return result, nil
+}
+
+// resolveAdditionalToolNamesFromState returns the set of additional tool names
+// requested by currently activated skills, read from invocation state.
+func (ts *SkillToolset) resolveAdditionalToolNamesFromState(ctx agent.ReadonlyContext) (map[string]bool, error) {
+	stateKey := fmt.Sprintf("_adk_activated_skill_%s", ctx.AgentName())
+	val, err := ctx.ReadonlyState().Get(stateKey)
+	if err != nil {
+		return nil, nil
+	}
+
+	activatedSkills, ok := val.([]string)
+	if !ok || len(activatedSkills) == 0 {
+		return nil, nil
+	}
+
+	toolNames := make(map[string]bool)
+	for _, skillName := range activatedSkills {
+		fm, err := ts.source.LoadFrontmatter(ctx, skillName)
+		if err != nil {
+			continue
+		}
+		if fm.Metadata == nil {
+			continue
+		}
+		raw, ok := fm.Metadata["adk_additional_tools"]
+		if !ok {
+			continue
+		}
+		// adk_additional_tools is a YAML list, unmarshalled as []any.
+		items, _ := raw.([]any)
+		for _, item := range items {
+			if name, ok := item.(string); ok && name != "" {
+				toolNames[name] = true
+			}
+		}
+	}
+	return toolNames, nil
 }
 
 // ProcessRequest implements toolinternal.RequestProcessor. It attaches
