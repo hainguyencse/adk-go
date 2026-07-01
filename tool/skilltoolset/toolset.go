@@ -52,7 +52,8 @@ type Config struct {
 	// Optional system instruction. If empty, default instruction will be used.
 	SystemInstruction string
 
-	AdditionalTools []tool.Tool
+	AdditionalTools    []tool.Tool
+	AdditionalToolsets []tool.Toolset
 
 	// PreloadAdditionalTools loads additional tools at initialization rather than
 	// waiting for a skill to be activated. By default, additional tools are deferred
@@ -67,6 +68,7 @@ type SkillToolset struct {
 	source                 skill.Source
 	systemInstruction      string
 	additionalTools        []tool.Tool
+	additionalToolsets     []tool.Toolset
 	preloadAdditionalTools bool
 }
 
@@ -101,6 +103,7 @@ func New(ctx context.Context, cfg Config) (*SkillToolset, error) {
 		source:                 cfg.Source,
 		systemInstruction:      instruction,
 		additionalTools:        cfg.AdditionalTools,
+		additionalToolsets:     cfg.AdditionalToolsets,
 		preloadAdditionalTools: cfg.PreloadAdditionalTools,
 	}, nil
 }
@@ -130,6 +133,17 @@ func (ts *SkillToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 	candidates := make(map[string]tool.Tool)
 	for _, t := range ts.additionalTools {
 		candidates[t.Name()] = t
+	}
+
+	// Build a map of candidate tools from additionalToolsets.
+	for _, toolset := range ts.additionalToolsets {
+		tools, err := toolset.Tools(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("get tools from additional toolset %s: %w", toolset.Name(), err)
+		}
+		for _, t := range tools {
+			candidates[t.Name()] = t
+		}
 	}
 
 	existing := make(map[string]bool, len(result))
