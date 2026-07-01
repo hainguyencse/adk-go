@@ -52,18 +52,22 @@ type Config struct {
 	// Optional system instruction. If empty, default instruction will be used.
 	SystemInstruction string
 
-	AdditionalTools    []tool.Tool
-	AdditionalToolsets []tool.Toolset
+	AdditionalTools []tool.Tool
+
+	// PreloadAdditionalTools loads additional tools at initialization rather than
+	// waiting for a skill to be activated. By default, additional tools are deferred
+	// until the next turn after a skill is activated (and are never loaded in RunLive mode).
+	PreloadAdditionalTools bool
 }
 
 // SkillToolset provides a toolset for skills.
 type SkillToolset struct {
-	name               string
-	tools              []tool.Tool
-	source             skill.Source
-	systemInstruction  string
-	additionalTools    []tool.Tool
-	additionalToolsets []tool.Toolset
+	name                   string
+	tools                  []tool.Tool
+	source                 skill.Source
+	systemInstruction      string
+	additionalTools        []tool.Tool
+	preloadAdditionalTools bool
 }
 
 // New creates a new Skill Toolset based on the provided configuration.
@@ -92,12 +96,12 @@ func New(ctx context.Context, cfg Config) (*SkillToolset, error) {
 		return nil, fmt.Errorf("create load skill resource tool: %w", err)
 	}
 	return &SkillToolset{
-		name:               name,
-		tools:              []tool.Tool{listTool, loadTool, loadResourceTool},
-		source:             cfg.Source,
-		systemInstruction:  instruction,
-		additionalTools:    cfg.AdditionalTools,
-		additionalToolsets: cfg.AdditionalToolsets,
+		name:                   name,
+		tools:                  []tool.Tool{listTool, loadTool, loadResourceTool},
+		source:                 cfg.Source,
+		systemInstruction:      instruction,
+		additionalTools:        cfg.AdditionalTools,
+		preloadAdditionalTools: cfg.PreloadAdditionalTools,
 	}, nil
 }
 
@@ -122,19 +126,10 @@ func (ts *SkillToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 		return result, nil
 	}
 
-	// Build a map of candidate tools from additionalTools and additionalToolsets.
+	// Build a map of candidate tools from additionalTools.
 	candidates := make(map[string]tool.Tool)
 	for _, t := range ts.additionalTools {
 		candidates[t.Name()] = t
-	}
-	for _, toolset := range ts.additionalToolsets {
-		tsTools, err := toolset.Tools(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("get tools from toolset %q: %w", toolset.Name(), err)
-		}
-		for _, t := range tsTools {
-			candidates[t.Name()] = t
-		}
 	}
 
 	existing := make(map[string]bool, len(result))
@@ -160,15 +155,9 @@ func (ts *SkillToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 // resolveAdditionalToolNamesFromState returns the set of additional tool names
 // requested by currently activated skills, read from invocation state.
 func (ts *SkillToolset) resolveAdditionalToolNamesFromState(ctx agent.ReadonlyContext) (map[string]bool, error) {
-	stateKey := fmt.Sprintf("_adk_activated_skill_%s", ctx.AgentName())
-	val, err := ctx.ReadonlyState().Get(stateKey)
+	activatedSkills, err := ts.getActivatedSkills(ctx)
 	if err != nil {
-		return nil, nil
-	}
-
-	activatedSkills, ok := val.([]string)
-	if !ok || len(activatedSkills) == 0 {
-		return nil, nil
+		return nil, fmt.Errorf("get activated skills: %w", err)
 	}
 
 	toolNames := make(map[string]bool)
@@ -193,6 +182,35 @@ func (ts *SkillToolset) resolveAdditionalToolNamesFromState(ctx agent.ReadonlyCo
 		}
 	}
 	return toolNames, nil
+}
+
+func (ts *SkillToolset) getActivatedSkills(ctx agent.ReadonlyContext) ([]string, error) {
+	if ts.preloadAdditionalTools {
+		frontmatter, err := ts.source.ListFrontmatters(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		var activatedSkills []string
+		for _, fm := range frontmatter {
+			activatedSkills = append(activatedSkills, fm.Name)
+		}
+
+		return activatedSkills, nil
+	}
+
+	stateKey := fmt.Sprintf("_adk_activated_skill_%s", ctx.AgentName())
+	val, err := ctx.ReadonlyState().Get(stateKey)
+	if err != nil {
+		return nil, nil
+	}
+
+	activatedSkills, ok := val.([]string)
+	if !ok || len(activatedSkills) == 0 {
+		return nil, nil
+	}
+
+	return activatedSkills, nil
 }
 
 // ProcessRequest implements toolinternal.RequestProcessor. It attaches
