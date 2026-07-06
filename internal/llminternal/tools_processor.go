@@ -22,20 +22,38 @@ import (
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool"
 )
 
-// ContentRequestProcessor populates the LLMRequest's Contents based on
-// the InvocationContext that includes the previous events.
+// toolProcessor populates f.Tools from the agent's tools and toolsets.
+// Tools are cached in f.Tools after the first call. If any toolset implements
+// tool.DynamicToolset and returns NeedsMidTurnReload() == true, the cache is
+// invalidated before each LLM call so that newly activated skills' additional
+// tools become available within the same turn.
 func toolProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		if f.Tools != nil {
-			return
-		}
 		llmAgent, ok := ctx.Agent().(Agent)
 		if !ok {
 			yield(nil, fmt.Errorf("agent %v is not an LLMAgent", ctx.Agent().Name()))
 			return
 		}
+
+		if f.Tools != nil {
+			// Check whether any toolset needs mid-turn reload (e.g. SkillToolset
+			// after a skill has been activated this turn).
+			needsReload := false
+			for _, ts := range Reveal(llmAgent).Toolsets {
+				if dts, ok := ts.(tool.DynamicToolset); ok && dts.NeedsMidTurnReload() {
+					needsReload = true
+					break
+				}
+			}
+			if !needsReload {
+				return
+			}
+			f.Tools = nil
+		}
+
 		tools := Reveal(llmAgent).Tools
 		for _, toolSet := range Reveal(llmAgent).Toolsets {
 			tsTools, err := toolSet.Tools(icontext.NewReadonlyContext(ctx))

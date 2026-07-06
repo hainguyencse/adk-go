@@ -112,6 +112,16 @@ type Toolset interface {
 	Tools(ctx agent.ReadonlyContext) ([]Tool, error)
 }
 
+// DynamicToolset is an optional interface for Toolsets whose available tools
+// can change mid-turn (e.g. after state is updated by a tool call). When a
+// DynamicToolset reports NeedsMidTurnReload() == true, the framework re-fetches
+// tools before each LLM call within the same invocation instead of using the
+// cached set from the first call.
+type DynamicToolset interface {
+	Toolset
+	NeedsMidTurnReload() bool
+}
+
 // Predicate is a function which decides whether a tool should be exposed to LLM.
 type Predicate func(ctx agent.ReadonlyContext, tool Tool) bool
 
