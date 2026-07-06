@@ -41,6 +41,10 @@ func toolProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) 
 		if f.Tools != nil {
 			// Check whether any toolset needs mid-turn reload (e.g. SkillToolset
 			// after a skill has been activated this turn).
+			// By default, tools only load 1 turn then cached it.
+			// But for skilltoolset logic, it need reload tools after skill activated
+			// So that the newly activated skill's additional tools can be used in the same turn.
+			// Reference logic: SkillToolset _use_invocation_cache in adk-python
 			needsReload := false
 			for _, ts := range Reveal(llmAgent).Toolsets {
 				if dts, ok := ts.(tool.DynamicToolset); ok && dts.NeedsMidTurnReload() {
