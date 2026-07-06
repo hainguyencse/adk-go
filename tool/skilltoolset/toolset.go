@@ -54,22 +54,16 @@ type Config struct {
 
 	AdditionalTools    []tool.Tool
 	AdditionalToolsets []tool.Toolset
-
-	// PreloadAdditionalTools loads additional tools at initialization rather than
-	// waiting for a skill to be activated. By default, additional tools are deferred
-	// until the next turn after a skill is activated (and are never loaded in RunLive mode).
-	PreloadAdditionalTools bool
 }
 
 // SkillToolset provides a toolset for skills.
 type SkillToolset struct {
-	name                   string
-	tools                  []tool.Tool
-	source                 skill.Source
-	systemInstruction      string
-	additionalTools        []tool.Tool
-	additionalToolsets     []tool.Toolset
-	preloadAdditionalTools bool
+	name               string
+	tools              []tool.Tool
+	source             skill.Source
+	systemInstruction  string
+	additionalTools    []tool.Tool
+	additionalToolsets []tool.Toolset
 }
 
 // New creates a new Skill Toolset based on the provided configuration.
@@ -98,18 +92,26 @@ func New(ctx context.Context, cfg Config) (*SkillToolset, error) {
 		return nil, fmt.Errorf("create load skill resource tool: %w", err)
 	}
 	return &SkillToolset{
-		name:                   name,
-		tools:                  []tool.Tool{listTool, loadTool, loadResourceTool},
-		source:                 cfg.Source,
-		systemInstruction:      instruction,
-		additionalTools:        cfg.AdditionalTools,
-		additionalToolsets:     cfg.AdditionalToolsets,
-		preloadAdditionalTools: cfg.PreloadAdditionalTools,
+		name:               name,
+		tools:              []tool.Tool{listTool, loadTool, loadResourceTool},
+		source:             cfg.Source,
+		systemInstruction:  instruction,
+		additionalTools:    cfg.AdditionalTools,
+		additionalToolsets: cfg.AdditionalToolsets,
 	}, nil
 }
 
 // Name implements tool.Toolset. Returns the name of the toolset.
 func (ts *SkillToolset) Name() string { return ts.name }
+
+// NeedsMidTurnReload implements tool.DynamicToolset. Returns true when additional
+// tools are deferred until skill activation, so the framework re-fetches tools
+// before each LLM call within the same turn.
+// Reference idea: _use_invocation_cache adk-python -> SkillToolset(default _use_invocation_cache=False)
+func (ts *SkillToolset) NeedsMidTurnReload() bool {
+	// SkillToolset default reload tools mid-turn
+	return true
+}
 
 // Tools implements tool.Toolset. It returns all tools: core skill tools,
 // additional tools, and tools from additional toolsets, deduped by name.
@@ -199,20 +201,6 @@ func (ts *SkillToolset) resolveAdditionalToolNamesFromState(ctx agent.ReadonlyCo
 }
 
 func (ts *SkillToolset) getActivatedSkills(ctx agent.ReadonlyContext) ([]string, error) {
-	if ts.preloadAdditionalTools {
-		frontmatter, err := ts.source.ListFrontmatters(ctx)
-		if err != nil {
-			return nil, err
-		}
-
-		var activatedSkills []string
-		for _, fm := range frontmatter {
-			activatedSkills = append(activatedSkills, fm.Name)
-		}
-
-		return activatedSkills, nil
-	}
-
 	stateKey := fmt.Sprintf("_adk_activated_skill_%s", ctx.AgentName())
 	val, err := ctx.ReadonlyState().Get(stateKey)
 	if err != nil {
