@@ -54,11 +54,6 @@ type Config struct {
 
 	AdditionalTools    []tool.Tool
 	AdditionalToolsets []tool.Toolset
-
-	// PreloadAdditionalTools loads additional tools at initialization rather than
-	// waiting for a skill to be activated. By default, additional tools are deferred
-	// until the next turn after a skill is activated (and are never loaded in RunLive mode).
-	PreloadAdditionalTools bool
 }
 
 // SkillToolset provides a toolset for skills.
