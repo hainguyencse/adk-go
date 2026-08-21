@@ -17,6 +17,7 @@ package exampletool
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
@@ -61,6 +62,62 @@ func (m *mockToolContext) AppName() string                                      
 func (m *mockToolContext) Branch() string                                       { return "mock_branch" }
 func (m *mockToolContext) SessionID() string                                    { return "mock_session" }
 func (m *mockToolContext) UserID() string                                       { return "mock_user" }
+
+func (m *mockToolContext) Agent() agent.Agent          { return nil }
+func (m *mockToolContext) Memory() agent.Memory        { return nil }
+func (m *mockToolContext) Session() session.Session    { return nil }
+func (m *mockToolContext) RunConfig() *agent.RunConfig { return nil }
+func (m *mockToolContext) Ended() bool                 { return false }
+func (m *mockToolContext) EndInvocation()              {}
+func (m *mockToolContext) WithContext(ctx context.Context) agent.InvocationContext {
+	cp := *m
+	cp.Context = ctx
+	return &cp
+}
+func (m *mockToolContext) LiveRequestQueue() *agent.LiveRequestQueue          { return nil }
+func (m *mockToolContext) TranscriptionCache() []agent.TranscriptionEntry     { return nil }
+func (m *mockToolContext) InputRealtimeCache() []agent.RealtimeCacheEntry     { return nil }
+func (m *mockToolContext) OutputRealtimeCache() []agent.RealtimeCacheEntry    { return nil }
+func (m *mockToolContext) ResumabilityConfig() *agent.ResumabilityConfig      { return nil }
+func (m *mockToolContext) AppendInputRealtimeCache(agent.RealtimeCacheEntry)  {}
+func (m *mockToolContext) AppendOutputRealtimeCache(agent.RealtimeCacheEntry) {}
+func (m *mockToolContext) ClearInputRealtimeCache()                           {}
+func (m *mockToolContext) ClearOutputRealtimeCache()                          {}
+func (m *mockToolContext) LiveSessionResumptionHandle() string                { return "" }
+func (m *mockToolContext) SetLiveSessionResumptionHandle(string)              {}
+func (m *mockToolContext) ToolResponseCache() agent.ToolResponseCache         { return nil }
+func (m *mockToolContext) GetCachedToolResponse(context.Context, string) (map[string]any, bool) {
+	return nil, false
+}
+func (m *mockToolContext) SetCachedToolResponse(context.Context, string, map[string]any) {}
+
+func (m *mockToolContext) IsolationScope() string          { return "" }
+func (m *mockToolContext) ResumedInput(string) (any, bool) { return nil, false }
+func (m *mockToolContext) WithICDelta(*agent.InvocationContextDelta) agent.InvocationContext {
+	return m
+}
+func (m *mockToolContext) Path() string                            { return "" }
+func (m *mockToolContext) RunID() string                           { return "" }
+func (m *mockToolContext) SubScheduler() agent.DynamicSubScheduler { return nil }
+func (m *mockToolContext) WithAgentContext(ctx context.Context) agent.Context {
+	cp := *m
+	cp.Context = ctx
+	return &cp
+}
+func (m *mockToolContext) WithAgentTimeout(timeout time.Duration) (agent.Context, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(m.Context, timeout)
+	cp := *m
+	cp.Context = ctx
+	return &cp, cancel
+}
+func (m *mockToolContext) WithAgentCancel() (agent.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(m.Context)
+	cp := *m
+	cp.Context = ctx
+	return &cp, cancel
+}
+func (m *mockToolContext) OutputForAncestors() []string                      { return nil }
+func (m *mockToolContext) WithDelta(*agent.CommonContextDelta) agent.Context { return m }
 
 // --- Tests ---
 

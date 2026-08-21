@@ -474,6 +474,56 @@ func (m *MockToolContext) Deadline() (deadline time.Time, ok bool)              
 func (m *MockToolContext) Done() <-chan struct{}                                { return nil }
 func (m *MockToolContext) Err() error                                           { return nil }
 
+func (m *MockToolContext) Agent() agent.Agent          { return nil }
+func (m *MockToolContext) Memory() agent.Memory        { return nil }
+func (m *MockToolContext) Session() session.Session    { return nil }
+func (m *MockToolContext) RunConfig() *agent.RunConfig { return nil }
+func (m *MockToolContext) Ended() bool                 { return false }
+func (m *MockToolContext) EndInvocation()              {}
+func (m *MockToolContext) WithContext(ctx context.Context) agent.InvocationContext {
+	cp := *m
+	return &cp
+}
+func (m *MockToolContext) LiveRequestQueue() *agent.LiveRequestQueue          { return nil }
+func (m *MockToolContext) TranscriptionCache() []agent.TranscriptionEntry     { return nil }
+func (m *MockToolContext) InputRealtimeCache() []agent.RealtimeCacheEntry     { return nil }
+func (m *MockToolContext) OutputRealtimeCache() []agent.RealtimeCacheEntry    { return nil }
+func (m *MockToolContext) ResumabilityConfig() *agent.ResumabilityConfig      { return nil }
+func (m *MockToolContext) AppendInputRealtimeCache(agent.RealtimeCacheEntry)  {}
+func (m *MockToolContext) AppendOutputRealtimeCache(agent.RealtimeCacheEntry) {}
+func (m *MockToolContext) ClearInputRealtimeCache()                           {}
+func (m *MockToolContext) ClearOutputRealtimeCache()                          {}
+func (m *MockToolContext) LiveSessionResumptionHandle() string                { return "" }
+func (m *MockToolContext) SetLiveSessionResumptionHandle(string)              {}
+func (m *MockToolContext) ToolResponseCache() agent.ToolResponseCache         { return nil }
+func (m *MockToolContext) GetCachedToolResponse(context.Context, string) (map[string]any, bool) {
+	return nil, false
+}
+func (m *MockToolContext) SetCachedToolResponse(context.Context, string, map[string]any) {}
+
+func (m *MockToolContext) IsolationScope() string          { return "" }
+func (m *MockToolContext) ResumedInput(string) (any, bool) { return nil, false }
+func (m *MockToolContext) WithICDelta(*agent.InvocationContextDelta) agent.InvocationContext {
+	return m
+}
+func (m *MockToolContext) Path() string                            { return "" }
+func (m *MockToolContext) RunID() string                           { return "" }
+func (m *MockToolContext) SubScheduler() agent.DynamicSubScheduler { return nil }
+func (m *MockToolContext) WithAgentContext(ctx context.Context) agent.Context {
+	cp := *m
+	return &cp
+}
+func (m *MockToolContext) WithAgentTimeout(timeout time.Duration) (agent.Context, context.CancelFunc) {
+	cp := *m
+	return &cp, func() {}
+}
+func (m *MockToolContext) WithAgentCancel() (agent.Context, context.CancelFunc) {
+	cp := *m
+	return &cp, func() {}
+}
+func (m *MockToolContext) OutputForAncestors() []string                      { return nil }
+func (m *MockToolContext) WithDelta(*agent.CommonContextDelta) agent.Context { return m }
+
 // MockTool
 type MockTool struct {
 	NameVal string
