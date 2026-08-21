@@ -179,7 +179,8 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 		})
 		defer endSpan()
 		// TODO: verify&update the setup here. Should we branch etc.
-		ctx := &invocationContext{
+		parent := ctx
+		ic := &invocationContext{
 			Context:   ctx.WithContext(spanCtx),
 			agent:     a,
 			artifacts: ctx.Artifacts(),
@@ -194,6 +195,16 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 
 			toolResponseCache: ctx.ToolResponseCache(),
 		}
+		var newCtx InvocationContext = ic
+		// Preserve the caller's isolation scope (see Context.IsolationScope)
+		// across this rebuild, so agents nested under a workflow node
+		// activation stay correctly scoped.
+		if scoped, ok := parent.(interface{ IsolationScope() string }); ok {
+			if scope := scoped.IsolationScope(); scope != "" {
+				newCtx = Promote(ic).WithICDelta(&InvocationContextDelta{IsolationScope: &scope})
+			}
+		}
+		ctx = newCtx
 		event, err := runBeforeAgentCallbacks(ctx)
 		if event != nil || err != nil {
 			if !yield(event, err) {

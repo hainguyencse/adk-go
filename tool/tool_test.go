@@ -18,6 +18,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/genai"
 
@@ -148,6 +149,62 @@ func (c *testContext) AppName() string                      { return "test-app" 
 func (c *testContext) Branch() string                       { return "test-branch" }
 func (c *testContext) SessionID() string                    { return "test-session-id" }
 func (c *testContext) UserID() string                       { return "test-user-id" }
+
+func (c *testContext) Agent() agent.Agent          { return nil }
+func (c *testContext) Memory() agent.Memory        { return nil }
+func (c *testContext) Session() session.Session    { return nil }
+func (c *testContext) RunConfig() *agent.RunConfig { return nil }
+func (c *testContext) Ended() bool                 { return false }
+func (c *testContext) EndInvocation()              {}
+func (c *testContext) WithContext(ctx context.Context) agent.InvocationContext {
+	cp := *c
+	cp.Context = ctx
+	return &cp
+}
+func (c *testContext) LiveRequestQueue() *agent.LiveRequestQueue          { return nil }
+func (c *testContext) TranscriptionCache() []agent.TranscriptionEntry     { return nil }
+func (c *testContext) InputRealtimeCache() []agent.RealtimeCacheEntry     { return nil }
+func (c *testContext) OutputRealtimeCache() []agent.RealtimeCacheEntry    { return nil }
+func (c *testContext) ResumabilityConfig() *agent.ResumabilityConfig      { return nil }
+func (c *testContext) AppendInputRealtimeCache(agent.RealtimeCacheEntry)  {}
+func (c *testContext) AppendOutputRealtimeCache(agent.RealtimeCacheEntry) {}
+func (c *testContext) ClearInputRealtimeCache()                           {}
+func (c *testContext) ClearOutputRealtimeCache()                          {}
+func (c *testContext) LiveSessionResumptionHandle() string                { return "" }
+func (c *testContext) SetLiveSessionResumptionHandle(string)              {}
+func (c *testContext) ToolResponseCache() agent.ToolResponseCache         { return nil }
+func (c *testContext) GetCachedToolResponse(context.Context, string) (map[string]any, bool) {
+	return nil, false
+}
+func (c *testContext) SetCachedToolResponse(context.Context, string, map[string]any) {}
+
+func (c *testContext) IsolationScope() string          { return "" }
+func (c *testContext) ResumedInput(string) (any, bool) { return nil, false }
+func (c *testContext) WithICDelta(*agent.InvocationContextDelta) agent.InvocationContext {
+	return c
+}
+func (c *testContext) Path() string                            { return "" }
+func (c *testContext) RunID() string                           { return "" }
+func (c *testContext) SubScheduler() agent.DynamicSubScheduler { return nil }
+func (c *testContext) WithAgentContext(ctx context.Context) agent.Context {
+	cp := *c
+	cp.Context = ctx
+	return &cp
+}
+func (c *testContext) WithAgentTimeout(timeout time.Duration) (agent.Context, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(c.Context, timeout)
+	cp := *c
+	cp.Context = ctx
+	return &cp, cancel
+}
+func (c *testContext) WithAgentCancel() (agent.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(c.Context)
+	cp := *c
+	cp.Context = ctx
+	return &cp, cancel
+}
+func (c *testContext) OutputForAncestors() []string                      { return nil }
+func (c *testContext) WithDelta(*agent.CommonContextDelta) agent.Context { return c }
 
 type testToolset struct {
 	tools []tool.Tool

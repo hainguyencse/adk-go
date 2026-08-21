@@ -1,0 +1,104 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package agent
+
+import (
+	"context"
+
+	"google.golang.org/genai"
+)
+
+// CommonContextDelta holds all the changes which should be applied to a new
+// child context based on [Context].
+type CommonContextDelta struct {
+	ResumeInputs           *map[string]any
+	InvocationContextDelta *InvocationContextDelta
+	Path                   *string
+	RunID                  *string
+	SubScheduler           *DynamicSubScheduler
+	OutputForAncestors     *[]string
+}
+
+// InvocationContextDelta holds all the changes which should be applied to a
+// new child context based on the wrapped [InvocationContext].
+type InvocationContextDelta struct {
+	Context        *context.Context
+	UserContent    **genai.Content
+	Agent          *Agent
+	Branch         *string
+	IsolationScope *string
+}
+
+// WithDelta returns a new Context with all the changes from d applied.
+// If there are no changes, the original context is returned.
+func (c *commonContext) WithDelta(d *CommonContextDelta) Context {
+	if d == nil {
+		return c
+	}
+	res := *c
+
+	if d.InvocationContextDelta != nil {
+		res.applyICDelta(d.InvocationContextDelta)
+	}
+	if d.ResumeInputs != nil {
+		res.resumeInputs = *d.ResumeInputs
+	}
+	if d.Path != nil {
+		res.path = *d.Path
+	}
+	if d.RunID != nil {
+		res.runID = *d.RunID
+	}
+	if d.SubScheduler != nil {
+		res.subScheduler = *d.SubScheduler
+	}
+	if d.OutputForAncestors != nil {
+		res.outputForAncestors = *d.OutputForAncestors
+	}
+
+	return &res
+}
+
+// WithICDelta returns a new context (copying all the fields from the
+// original one) with changes applied to the wrapped [InvocationContext].
+func (c *commonContext) WithICDelta(d *InvocationContextDelta) InvocationContext {
+	if d == nil {
+		return c
+	}
+	res := *c
+	res.applyICDelta(d)
+	return &res
+}
+
+func (c *commonContext) applyICDelta(d *InvocationContextDelta) {
+	if d == nil {
+		return
+	}
+	if d.Context != nil {
+		c.Context = *d.Context
+	}
+	if d.UserContent != nil {
+		c.userContentOverride = d.UserContent
+	}
+	if d.Agent != nil {
+		c.agentOverride = d.Agent
+	}
+	if d.Branch != nil {
+		c.branchOverride = d.Branch
+	}
+	if d.IsolationScope != nil {
+		c.isolationScope = *d.IsolationScope
+	}
+}

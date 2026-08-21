@@ -19,6 +19,7 @@ import (
 	"iter"
 	"time"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/google/uuid"
 
 	"google.golang.org/adk/model"
@@ -116,6 +117,65 @@ type Event struct {
 	// Agent client will know from this field about which function call is long running.
 	// Only valid for function call event.
 	LongRunningToolIDs []string
+
+	// IsolationScope tags the event with the workflow node isolation scope
+	// (see agent.Context.IsolationScope) it was produced under, if any.
+	IsolationScope string `json:"isolationScope,omitempty"`
+
+	// Routes carries routing information for workflow execution.
+	Routes []string `json:"routes,omitempty"`
+
+	// Output is the workflow node output this event carries, set by
+	// workflow.Node implementations. nil means "no output".
+	Output any `json:"output,omitempty"`
+
+	// NodeInfo carries workflow-node metadata (path, output provenance)
+	// for events emitted by a workflow node activation. Nil outside of a
+	// workflow run.
+	NodeInfo *NodeInfo `json:"nodeInfo,omitempty"`
+
+	// RequestedInput, when non-nil, marks this event as a
+	// Human-in-the-Loop prompt emitted by a workflow node; see
+	// workflow.NewRequestInputEvent and RequestInput.
+	RequestedInput *RequestInput `json:"requestedInput,omitempty"`
+}
+
+// NodeInfo carries metadata about the workflow node whose activation emitted
+// an event.
+type NodeInfo struct {
+	// Path is the composite path of the emitting node within its
+	// workflow activation. Empty for top-level static nodes;
+	// "<parent_path>/<child_name>@<run_id>" for dynamic children.
+	Path string `json:"path,omitempty"`
+
+	// MessageAsOutput marks that this event's content IS the node's
+	// output: when set and Event.Output is nil, readers derive the node
+	// output from the event's model text.
+	MessageAsOutput bool `json:"messageAsOutput,omitempty"`
+
+	// OutputFor lists the node paths this event's Output counts for: the
+	// emitter plus any delegating ancestors.
+	OutputFor []string `json:"outputFor,omitempty"`
+}
+
+// RequestInput describes a single human-in-the-loop prompt emitted by a
+// workflow node. It travels on Event.RequestedInput from the node, through
+// the scheduler, out to the UI surface; the matching response is routed
+// back by InterruptID.
+type RequestInput struct {
+	// InterruptID correlates this request with the response that resumes
+	// it. Leave empty to have the engine fill in a fresh UUID.
+	InterruptID string `json:"interruptId"`
+
+	// Message is the human-readable description of what is being asked.
+	Message string `json:"message,omitempty"`
+
+	// ResponseSchema, when non-nil, is the JSON schema the user's response
+	// payload must conform to.
+	ResponseSchema *jsonschema.Schema `json:"responseSchema,omitempty"`
+
+	// Payload is optional context the UI may render alongside the prompt.
+	Payload any `json:"payload,omitempty"`
 }
 
 // IsFinalResponse returns whether the event is the final response of an agent.
