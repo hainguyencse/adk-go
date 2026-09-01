@@ -69,6 +69,14 @@ func (c *liveConnection) SendHistory(contents []*genai.Content) error {
 		}
 	}
 
+	// Strip ThoughtSignature (and the Thought marker) from history parts.
+	// A thought signature is only valid when replayed within the live
+	// session that issued it (or via session resumption); echoing one
+	// from an unrelated or already-closed connection into
+	// SendClientContent causes the server to reject the request with
+	// "invalid argument" (websocket close 1007).
+	filteredContents = stripThoughtSignatures(filteredContents)
+
 	// Convert FunctionCall/FunctionResponse parts to text summaries.
 	// The Live API handles tool interactions via separate ToolCall /
 	// SendToolResponse protocol messages, NOT through SendClientContent
@@ -526,6 +534,31 @@ func isAudioPart(p *genai.Part) bool {
 		return true
 	}
 	return false
+}
+
+// stripThoughtSignatures returns copies of contents with ThoughtSignature
+// and the Thought marker cleared from every part. Original contents/parts
+// are left untouched.
+func stripThoughtSignatures(contents []*genai.Content) []*genai.Content {
+	out := make([]*genai.Content, len(contents))
+	for i, c := range contents {
+		if c == nil {
+			continue
+		}
+		parts := make([]*genai.Part, len(c.Parts))
+		for j, p := range c.Parts {
+			if p == nil || (p.ThoughtSignature == nil && !p.Thought) {
+				parts[j] = p
+				continue
+			}
+			stripped := *p
+			stripped.ThoughtSignature = nil
+			stripped.Thought = false
+			parts[j] = &stripped
+		}
+		out[i] = &genai.Content{Role: c.Role, Parts: parts}
+	}
+	return out
 }
 
 // filterAudioParts returns a copy of the content with audio parts removed.
