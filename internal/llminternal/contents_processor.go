@@ -71,7 +71,8 @@ func buildContentsDefault(agentName, invocationBranch string, events []*session.
 		// Skip events without content or generated neither by user nor
 		// by model.
 		// e.g. events purely for mutating session states.
-		if content == nil || content.Role == "" || len(content.Parts) == 0 {
+		if (content == nil || content.Role == "" || len(content.Parts) == 0) &&
+			ev.LLMResponse.InputTranscription == nil && ev.LLMResponse.OutputTranscription == nil {
 			// TODO: log a bad event with content but no Role is skipped
 			// Note: python checks here if content.Parts[0] is an empty string and skip if so.
 			// But unlike python that distinguishes None vs empty string, two cases are indistinguishable in Go.
@@ -91,6 +92,53 @@ func buildContentsDefault(agentName, invocationBranch string, events []*session.
 			filtered = append(filtered, ev)
 		}
 	}
+
+	// Aggregate consecutive transcription-only events (no Content) into a
+	// single text-content event each, so live-mode audio input/output
+	// transcriptions survive into the rebuilt conversation history instead
+	// of being dropped for lacking a Role/Parts.
+	var processedEvents []*session.Event
+	var accumulatedInputTranscription string
+	var accumulatedOutputTranscription string
+	for i := 0; i < len(filtered); i++ {
+		ev := filtered[i]
+		content := utils.Content(ev)
+		if content == nil || len(content.Parts) == 0 {
+			if ev.LLMResponse.InputTranscription != nil && ev.LLMResponse.InputTranscription.Text != "" {
+				accumulatedInputTranscription += ev.LLMResponse.InputTranscription.Text
+				if i != len(filtered)-1 &&
+					filtered[i+1].LLMResponse.InputTranscription != nil &&
+					filtered[i+1].LLMResponse.InputTranscription.Text != "" {
+					continue
+				}
+				newEv := cloneEvent(ev)
+				newEv.LLMResponse.InputTranscription = nil
+				newEv.LLMResponse.Content = &genai.Content{
+					Role:  "user",
+					Parts: []*genai.Part{{Text: accumulatedInputTranscription}},
+				}
+				ev = newEv
+				accumulatedInputTranscription = ""
+			} else if ev.LLMResponse.OutputTranscription != nil && ev.LLMResponse.OutputTranscription.Text != "" {
+				accumulatedOutputTranscription += ev.LLMResponse.OutputTranscription.Text
+				if i != len(filtered)-1 &&
+					filtered[i+1].LLMResponse.OutputTranscription != nil &&
+					filtered[i+1].LLMResponse.OutputTranscription.Text != "" {
+					continue
+				}
+				newEv := cloneEvent(ev)
+				newEv.LLMResponse.OutputTranscription = nil
+				newEv.LLMResponse.Content = &genai.Content{
+					Role:  "model",
+					Parts: []*genai.Part{{Text: accumulatedOutputTranscription}},
+				}
+				ev = newEv
+				accumulatedOutputTranscription = ""
+			}
+		}
+		processedEvents = append(processedEvents, ev)
+	}
+	filtered = processedEvents
 
 	//  src/google/adk/flows/llm_flows/contents.py
 	// 	 - _rearrange_events_for_async_function_response
