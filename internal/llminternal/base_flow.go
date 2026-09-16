@@ -1150,17 +1150,26 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 			}
 
 			// TODO: handle long-running tool.
+			functionResponse := &genai.FunctionResponse{
+				ID:       fnCall.ID,
+				Name:     fnCall.Name,
+				Response: result,
+			}
+
+			if curTool != nil && curTool.IsLongRunning() {
+				willContinue := true
+				functionResponse.WillContinue = &willContinue
+				functionResponse.Scheduling =
+					genai.FunctionResponseSchedulingSilent
+			}
+
 			ev := session.NewEvent(ctx.InvocationID())
 			ev.LLMResponse = model.LLMResponse{
 				Content: &genai.Content{
 					Role: "user",
 					Parts: []*genai.Part{
 						{
-							FunctionResponse: &genai.FunctionResponse{
-								ID:       fnCall.ID,
-								Name:     fnCall.Name,
-								Response: result,
-							},
+							FunctionResponse: functionResponse,
 						},
 					},
 				},
