@@ -432,7 +432,7 @@ func (c *liveConnection) process(ctx context.Context, in <-chan *genai.LiveServe
 					// deadlocking the conversation. Other models (e.g. 2.5-pro,
 					// native-audio) send turn_complete after tool calls, so buffer
 					// and merge them into a single response at turn_complete.
-					if isGemini31FlashLive(c.modelName) && len(toolCallParts) > 0 {
+					if shouldDispatchToolCallsImmediately(c.modelName) && len(toolCallParts) > 0 {
 						if !send(&model.LLMResponse{
 							Content: &genai.Content{Role: "model", Parts: toolCallParts},
 						}) {
@@ -656,4 +656,12 @@ func mergeConsecutiveSameRoleContents(contents []*genai.Content) []*genai.Conten
 	}
 	merged = append(merged, current)
 	return merged
+}
+
+func shouldDispatchToolCallsImmediately(modelName string) bool {
+	return isGemini31FlashLive(modelName) ||
+		strings.HasPrefix(
+			modelName,
+			"gemini-3.8-live-extended-thinking",
+		)
 }

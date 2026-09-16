@@ -304,7 +304,9 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 							// For example:
 							// - Function Call output -> Function Response -> LLM
 							// - App can manually send Function Response -> LLM
-							if hasFunctionResponse(ev.Content) && !hasTaskCompleted(ev.Content) {
+							if hasFunctionResponse(ev.Content) &&
+								!hasTaskCompleted(ev.Content) &&
+								!hasContinuingFunctionResponse(ev.Content) {
 								ctx.LiveRequestQueue().SendContent(ev.Content)
 							}
 
@@ -1159,8 +1161,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 			if curTool != nil && curTool.IsLongRunning() {
 				willContinue := true
 				functionResponse.WillContinue = &willContinue
-				functionResponse.Scheduling =
-					genai.FunctionResponseSchedulingSilent
+				// functionResponse.Scheduling = genai.FunctionResponseSchedulingSilent
 			}
 
 			ev := session.NewEvent(ctx.InvocationID())
@@ -1484,4 +1485,21 @@ type pluginManager interface {
 	RunBeforeToolCallback(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error)
 	RunAfterToolCallback(ctx tool.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error)
 	RunOnToolErrorCallback(ctx tool.Context, t tool.Tool, args map[string]any, err error) (map[string]any, error)
+}
+
+func hasContinuingFunctionResponse(content *genai.Content) bool {
+	if content == nil {
+		return false
+	}
+
+	for _, part := range content.Parts {
+		response := part.FunctionResponse
+		if response != nil &&
+			response.WillContinue != nil &&
+			*response.WillContinue {
+			return true
+		}
+	}
+
+	return false
 }
