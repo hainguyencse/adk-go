@@ -1149,18 +1149,19 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 				result, cacheHit = f.callTool(ctx, toolCtx, funcTool, fnCall.Args)
 			}
 
-			// TODO: handle long-running tool.
+			// A nil result from a long-running tool means that its response will be
+			// supplied externally after the operation completes. Do not send an
+			// empty FunctionResponse to the model: doing so would prematurely
+			// resolve the call and can trigger a duplicate model response when the
+			// real result arrives later.
+			if result == nil && curTool != nil && curTool.IsLongRunning() {
+				return
+			}
+
 			functionResponse := &genai.FunctionResponse{
 				ID:       fnCall.ID,
 				Name:     fnCall.Name,
 				Response: result,
-			}
-
-			if curTool != nil && curTool.IsLongRunning() {
-				willContinue := true
-				functionResponse.WillContinue = &willContinue
-				functionResponse.Scheduling =
-					genai.FunctionResponseSchedulingSilent
 			}
 
 			ev := session.NewEvent(ctx.InvocationID())
@@ -1350,23 +1351,30 @@ func mergeParallelFunctionResponseEvents(events []*session.Event) (*session.Even
 	}
 	var parts []*genai.Part
 	var actions *session.EventActions
+	var result *session.Event
 	for _, ev := range events {
 		if ev == nil || ev.LLMResponse.Content == nil {
 			continue
 		}
+		if result == nil {
+			result = ev
+		}
 		parts = append(parts, ev.LLMResponse.Content.Parts...)
 		actions = mergeEventActions(actions, &ev.Actions)
 	}
-	// reuse events[0]
-	ev := events[0]
-	ev.LLMResponse = model.LLMResponse{
+	// Every call may be a deferred long-running call, in which case there is
+	// no FunctionResponse event to merge yet.
+	if result == nil {
+		return nil, nil
+	}
+	result.LLMResponse = model.LLMResponse{
 		Content: &genai.Content{
 			Role:  "user",
 			Parts: parts,
 		},
 	}
-	ev.Actions = *actions
-	return ev, nil
+	result.Actions = *actions
+	return result, nil
 }
 
 func mergeEventActions(base, other *session.EventActions) *session.EventActions {

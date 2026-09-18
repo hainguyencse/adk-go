@@ -694,3 +694,13 @@ func TestMergeEventActions(t *testing.T) {
 		})
 	}
 }
+
+func TestMergeParallelFunctionResponseEventsAllDeferred(t *testing.T) {
+	got, err := mergeParallelFunctionResponseEvents([]*session.Event{nil, nil})
+	if err != nil {
+		t.Fatalf("mergeParallelFunctionResponseEvents() error = %v", err)
+	}
+	if got != nil {
+		t.Fatalf("mergeParallelFunctionResponseEvents() = %v, want nil", got)
+	}
+}

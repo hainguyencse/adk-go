@@ -21,6 +21,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent/llmagent"
@@ -94,6 +95,67 @@ func TestLongRunningStringFunctionFlow(t *testing.T) {
 		return "pending", nil
 	}
 	testLongRunningFunctionFlow(t, increaseByOne, "result", &functionCalled)
+}
+
+func TestLongRunningNilResultDefersFunctionResponse(t *testing.T) {
+	type deferredResult struct {
+		Status string `json:"status"`
+	}
+
+	mockModel := &testutil.MockModel{Responses: []*genai.Content{
+		genai.NewContentFromFunctionCall("deferred", map[string]any{}, "model"),
+	}}
+
+	functionCalled := 0
+	deferredTool, err := functiontool.New(functiontool.Config{
+		Name:          "deferred",
+		Description:   "starts an operation whose response arrives later",
+		IsLongRunning: true,
+		OutputSchema: &jsonschema.Schema{
+			Type:     "object",
+			Required: []string{"status"},
+			Properties: map[string]*jsonschema.Schema{
+				"status": {Type: "string"},
+			},
+		},
+	}, func(ctx tool.Context, x IncArgs) (*deferredResult, error) {
+		functionCalled++
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatalf("failed to create long-running tool: %v", err)
+	}
+
+	a, err := llmagent.New(llmagent.Config{
+		Name:  "long_running_agent",
+		Model: mockModel,
+		Tools: []tool.Tool{deferredTool},
+	})
+	if err != nil {
+		t.Fatalf("failed to create llm agent: %v", err)
+	}
+
+	runner := testutil.NewTestAgentRunner(t, a)
+	events, err := testutil.CollectEvents(runner.Run(t, "test_session", "start"))
+	if err != nil {
+		t.Fatalf("failed to collect events: %v", err)
+	}
+
+	if functionCalled != 1 {
+		t.Fatalf("function called %d times, want 1", functionCalled)
+	}
+	if len(mockModel.Requests) != 1 {
+		t.Fatalf("model received %d requests, want 1", len(mockModel.Requests))
+	}
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want only the function-call event", len(events))
+	}
+	if got := len(events[0].FunctionResponses()); got != 0 {
+		t.Fatalf("function-call event contains %d responses, want 0", got)
+	}
+	if got := events[0].LongRunningToolIDs; len(got) != 1 {
+		t.Fatalf("LongRunningToolIDs = %v, want one deferred call ID", got)
+	}
 }
 
 // --- Test Suite ---
