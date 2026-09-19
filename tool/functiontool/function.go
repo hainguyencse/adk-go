@@ -227,6 +227,22 @@ func (f *functionTool[TArgs, TResults]) Run(ctx tool.Context, args any) (result 
 	if err != nil {
 		return nil, err
 	}
+	// A nil result from a long-running handler means that the operation was
+	// started successfully and its FunctionResponse will be supplied later.
+	// Preserve typed nil pointers/maps/slices here instead of passing them
+	// through output-schema conversion, which may turn the deferred response
+	// into a validation error.
+	if f.cfg.IsLongRunning {
+		value := reflect.ValueOf(output)
+		if !value.IsValid() || ((value.Kind() == reflect.Chan ||
+			value.Kind() == reflect.Func ||
+			value.Kind() == reflect.Interface ||
+			value.Kind() == reflect.Map ||
+			value.Kind() == reflect.Pointer ||
+			value.Kind() == reflect.Slice) && value.IsNil()) {
+			return nil, nil
+		}
+	}
 	resp, err := typeutil.ConvertToWithJSONSchema[TResults, map[string]any](output, f.outputSchema)
 	if err == nil { // all good
 		return resp, nil
