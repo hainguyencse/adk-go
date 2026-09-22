@@ -31,12 +31,40 @@ import (
 	"google.golang.org/adk/internal/testutil"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/model/gemini"
+	"google.golang.org/adk/planner"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 )
 
 const modelName = "gemini-2.5-flash"
+
+func TestPlanner(t *testing.T) {
+	t.Parallel()
+
+	thinkingConfig := &genai.ThinkingConfig{IncludeThoughts: true}
+	mockModel := &testutil.MockModel{
+		Responses: []*genai.Content{genai.NewContentFromText("done", genai.RoleModel)},
+	}
+	a, err := llmagent.New(llmagent.Config{
+		Name:    "planning_agent",
+		Model:   mockModel,
+		Planner: planner.NewBuiltInPlanner(thinkingConfig),
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() unexpected error: %v", err)
+	}
+
+	if _, err := testutil.CollectTextParts(testutil.NewTestAgentRunner(t, a).Run(t, "session", "think")); err != nil {
+		t.Fatalf("agent run unexpected error: %v", err)
+	}
+	if len(mockModel.Requests) != 1 {
+		t.Fatalf("model received %d requests, want 1", len(mockModel.Requests))
+	}
+	if got := mockModel.Requests[0].Config.ThinkingConfig; got != thinkingConfig {
+		t.Errorf("request thinking config = %p, want %p", got, thinkingConfig)
+	}
+}
 
 //go:generate go test -httprecord=Test
 

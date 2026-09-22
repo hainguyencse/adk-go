@@ -26,6 +26,7 @@ import (
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/planner"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 )
@@ -78,6 +79,7 @@ func New(cfg Config) (agent.Agent, error) {
 			Model:                    cfg.Model,
 			GenerateContentConfig:    cfg.GenerateContentConfig,
 			LiveConnectConfig:        cfg.LiveConnectConfig,
+			Planner:                  cfg.Planner,
 			Tools:                    cfg.Tools,
 			Toolsets:                 cfg.Toolsets,
 			DisallowTransferToParent: cfg.DisallowTransferToParent,
@@ -167,6 +169,11 @@ type Config struct {
 	// For example: use this config to adjust model temperature, configure
 	// safety settings, etc.
 	GenerateContentConfig *genai.GenerateContentConfig
+
+	// Planner instructs the agent to make a plan and execute it step by step.
+	// Use planner.NewBuiltInPlanner for a model's built-in thinking features or
+	// planner.NewPlanReActPlanner for prompt-based Plan-Re-Act planning.
+	Planner planner.Planner
 
 	// LiveConnectConfig is for the live connection configuration.
 	LiveConnectConfig *genai.LiveConnectConfig
