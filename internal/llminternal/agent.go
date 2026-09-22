@@ -19,6 +19,7 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/planner"
 	"google.golang.org/adk/tool"
 )
 
@@ -37,6 +38,7 @@ type State struct {
 
 	GenerateContentConfig *genai.GenerateContentConfig
 	LiveConnectConfig     *genai.LiveConnectConfig
+	Planner               planner.Planner
 
 	Instruction               string
 	InstructionProvider       InstructionProvider
