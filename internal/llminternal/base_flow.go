@@ -51,6 +51,22 @@ var ErrModelNotConfigured = errors.New("model not configured; ensure Model is se
 // maxLiveReconnectAttempts mirrors Python's DEFAULT_MAX_RECONNECT_ATTEMPTS.
 const maxLiveReconnectAttempts = 5
 
+func isRetryableLiveCloseError(err error) bool {
+	var closeErr *websocket.CloseError
+	if !errors.As(err, &closeErr) {
+		return false
+	}
+
+	switch closeErr.Code {
+	case websocket.CloseNormalClosure,
+		websocket.CloseAbnormalClosure,
+		websocket.CloseInternalServerErr:
+		return true
+	default:
+		return false
+	}
+}
+
 type BeforeModelCallback func(ctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error)
 
 type AfterModelCallback func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
@@ -343,11 +359,11 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 								reconnectCh <- struct{}{}
 								return
 							}
-							// WebSocket close code 1000 (normal) or 1006 (abnormal) indicates
-							// an intermittent connection drop (e.g. "The operation was cancelled").
+							// WebSocket close codes 1000 (normal), 1006 (abnormal), and 1011
+							// (internal server error) indicate a recoverable connection drop.
 							// Reconnect transparently with the session handle, mirroring Python's
-							// handling of ConnectionClosedOK / APIError codes 1000 and 1006.
-							if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseAbnormalClosure) && ctx.LiveSessionResumptionHandle() != "" {
+							// handling of ConnectionClosedOK / APIError codes 1000, 1006, and 1011.
+							if isRetryableLiveCloseError(err) && ctx.LiveSessionResumptionHandle() != "" {
 								if attempt > maxLiveReconnectAttempts {
 									log.Error(ctx, "Max reconnection attempts reached", err, "attempt", attempt)
 									liveCh <- liveResult{err: err}

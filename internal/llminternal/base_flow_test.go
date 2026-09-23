@@ -17,9 +17,11 @@ package llminternal
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/gorilla/websocket"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -29,6 +31,56 @@ import (
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 )
+
+func TestIsRetryableLiveCloseError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "normal closure",
+			err:  &websocket.CloseError{Code: websocket.CloseNormalClosure},
+			want: true,
+		},
+		{
+			name: "abnormal closure",
+			err:  &websocket.CloseError{Code: websocket.CloseAbnormalClosure},
+			want: true,
+		},
+		{
+			name: "internal server error",
+			err:  &websocket.CloseError{Code: websocket.CloseInternalServerErr},
+			want: true,
+		},
+		{
+			name: "wrapped internal server error",
+			err: fmt.Errorf(
+				"receive live response: %w",
+				&websocket.CloseError{Code: websocket.CloseInternalServerErr},
+			),
+			want: true,
+		},
+		{
+			name: "policy violation",
+			err:  &websocket.CloseError{Code: websocket.ClosePolicyViolation},
+			want: false,
+		},
+		{
+			name: "non websocket error",
+			err:  errors.New("connection failed"),
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isRetryableLiveCloseError(tt.err); got != tt.want {
+				t.Fatalf("isRetryableLiveCloseError() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
 
 type mockFunctionTool struct {
 	name          string
