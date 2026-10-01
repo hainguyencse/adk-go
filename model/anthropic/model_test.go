@@ -358,10 +358,16 @@ func TestNewModelValidatesConfigurationBeforeLoadingCredentials(t *testing.T) {
 		want      string
 	}{
 		{
-			name:      "model",
-			modelName: "gemini-2.5-flash",
+			name:      "blank model name",
+			modelName: " ",
 			config:    &Config{ProjectID: "project", Location: "us-east5"},
-			want:      "Claude model ID is required",
+			want:      "model name is required",
+		},
+		{
+			name:      "non-Claude name is not rejected by prefix",
+			modelName: "future-model",
+			config:    &Config{ProjectID: "project", Location: "us-east5", CredentialsJSON: "not JSON"},
+			want:      "load Google Cloud credentials for Claude",
 		},
 		{
 			name:      "nil config",

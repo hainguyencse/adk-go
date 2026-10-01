@@ -76,13 +76,86 @@ func TestValidateGenerateContentConfig(t *testing.T) {
 			wantError: "must be less than max output tokens",
 		},
 		{
+			name:      "manual budget is supported",
+			modelName: "claude-sonnet-4-5",
+			config: &genai.GenerateContentConfig{ThinkingConfig: &genai.ThinkingConfig{
+				ThinkingBudget:  genai.Ptr(int32(2048)),
+				IncludeThoughts: true,
+			}},
+		},
+		{
+			name:      "manual minimum budget is supported",
+			modelName: "claude-sonnet-4-5",
+			config: &genai.GenerateContentConfig{ThinkingConfig: &genai.ThinkingConfig{
+				ThinkingBudget: genai.Ptr(int32(1024)),
+			}},
+		},
+		{
+			name:      "manual budget below minimum",
+			modelName: "claude-sonnet-4-5",
+			config: &genai.GenerateContentConfig{ThinkingConfig: &genai.ThinkingConfig{
+				ThinkingBudget: genai.Ptr(int32(1023)),
+			}},
+			wantError: "requires a fixed ThinkingBudget of at least 1024",
+		},
+		{
+			name:      "manual thinking disabled",
+			modelName: "claude-sonnet-4-5",
+			config: &genai.GenerateContentConfig{ThinkingConfig: &genai.ThinkingConfig{
+				ThinkingBudget: genai.Ptr(int32(0)),
+			}},
+		},
+		{
+			name:      "manual level needs budget",
+			modelName: "claude-sonnet-4-5",
+			config: &genai.GenerateContentConfig{ThinkingConfig: &genai.ThinkingConfig{
+				ThinkingLevel: genai.ThinkingLevelHigh,
+			}},
+			wantError: "does not support ThinkingLevel",
+		},
+		{
+			name:      "manual level is not silently ignored with a budget",
+			modelName: "claude-sonnet-4-5",
+			config: &genai.GenerateContentConfig{ThinkingConfig: &genai.ThinkingConfig{
+				ThinkingLevel:  genai.ThinkingLevelLow,
+				ThinkingBudget: genai.Ptr(int32(2048)),
+			}},
+			wantError: "does not support ThinkingLevel",
+		},
+		{
+			name:      "manual include thoughts needs budget",
+			modelName: "claude-sonnet-4-5",
+			config: &genai.GenerateContentConfig{ThinkingConfig: &genai.ThinkingConfig{
+				IncludeThoughts: true,
+			}},
+			wantError: "requires an explicit ThinkingBudget",
+		},
+		{
+			name:      "manual dynamic budget is unsupported",
+			modelName: "claude-sonnet-4-5",
+			config: &genai.GenerateContentConfig{ThinkingConfig: &genai.ThinkingConfig{
+				ThinkingBudget: genai.Ptr(int32(-1)),
+			}},
+			wantError: "requires a fixed ThinkingBudget",
+		},
+		{
+			name:      "manual thoughts cannot be included when disabled",
+			modelName: "claude-sonnet-4-5",
+			config: &genai.GenerateContentConfig{ThinkingConfig: &genai.ThinkingConfig{
+				ThinkingBudget:  genai.Ptr(int32(0)),
+				IncludeThoughts: true,
+			}},
+			wantError: "cannot include thoughts",
+		},
+		{
 			name:      "unknown model with options",
 			modelName: "claude-opus-6",
 			config:    &genai.GenerateContentConfig{Temperature: genai.Ptr(float32(0.5))},
 			wantError: "no declared thinking and sampling capabilities",
 		},
 		{name: "unknown model without special options", modelName: "claude-opus-6", config: &genai.GenerateContentConfig{}},
-		{name: "not a Claude model", modelName: "gemini-2.5-flash", wantError: "Claude model ID is required"},
+		{name: "non-Claude name without special options", modelName: "future-model", config: &genai.GenerateContentConfig{}},
+		{name: "empty model name", modelName: " ", wantError: "model name is required"},
 	}
 
 	for _, tt := range tests {
@@ -95,11 +168,9 @@ func TestValidateGenerateContentConfig(t *testing.T) {
 				t.Fatalf("ValidateGenerateContentConfig() error = %v, want %q", err, tt.wantError)
 			}
 
-			if strings.HasPrefix(tt.modelName, "claude-") {
-				_, requestErr := buildRequest(tt.modelName, &adkmodel.LLMRequest{Config: tt.config})
-				if (err == nil) != (requestErr == nil) || (err != nil && err.Error() != requestErr.Error()) {
-					t.Fatalf("preflight error = %v, request error = %v", err, requestErr)
-				}
+			_, requestErr := buildRequest(tt.modelName, &adkmodel.LLMRequest{Config: tt.config})
+			if (err == nil) != (requestErr == nil) || (err != nil && err.Error() != requestErr.Error()) {
+				t.Fatalf("preflight error = %v, request error = %v", err, requestErr)
 			}
 		})
 	}
@@ -168,10 +239,10 @@ func TestValidateGenerateContentConfigDefersUnpopulatedToolChoice(t *testing.T) 
 	}
 }
 
-func TestHighThinkingRaisesDefaultMaxTokens(t *testing.T) {
+func TestExplicitManualThinkingBudgetRaisesDefaultMaxTokens(t *testing.T) {
 	req := &adkmodel.LLMRequest{Config: &genai.GenerateContentConfig{
 		ThinkingConfig: &genai.ThinkingConfig{
-			ThinkingLevel: genai.ThinkingLevelHigh,
+			ThinkingBudget: genai.Ptr(int32(10000)),
 		},
 	}}
 	params, err := buildRequest("claude-sonnet-4-5", req)
@@ -337,8 +408,8 @@ func TestOpus47RejectsExplicitSampling(t *testing.T) {
 	}
 }
 
-func TestUnknownClaudeModelRequiresCapabilityReviewForThinking(t *testing.T) {
-	for _, name := range []string{"claude-opus-6", "claude-opus-5-5"} {
+func TestUnknownModelRequiresCapabilityReviewForThinking(t *testing.T) {
+	for _, name := range []string{"claude-opus-6", "claude-opus-5-5", "future-model"} {
 		t.Run(name, func(t *testing.T) {
 			_, err := buildRequest(name, &adkmodel.LLMRequest{Config: &genai.GenerateContentConfig{
 				ThinkingConfig: &genai.ThinkingConfig{IncludeThoughts: true},

@@ -30,11 +30,12 @@ import (
 const redactedSignaturePrefix = "anthropic:redacted:"
 
 // ValidateGenerateContentConfig checks Claude-specific options known before ADK
-// builds a request. It does not modify cfg or create Anthropic request params.
+// builds a request. Model availability is left to the provider, not inferred
+// from a name prefix. It does not modify cfg or create Anthropic request params.
 // ADK can add tools and content later; those are checked during conversion.
 func ValidateGenerateContentConfig(modelName string, cfg *genai.GenerateContentConfig) error {
-	if !strings.HasPrefix(modelName, "claude-") {
-		return fmt.Errorf("Claude model ID is required")
+	if strings.TrimSpace(modelName) == "" {
+		return fmt.Errorf("model name is required")
 	}
 	if cfg == nil {
 		return nil
@@ -70,7 +71,7 @@ func ValidateGenerateContentConfig(modelName string, cfg *genai.GenerateContentC
 	if capabilities.adaptiveThinking {
 		return validateAdaptiveThinkingConfig(modelName, capabilities, cfg.ThinkingConfig)
 	}
-	budget, enabled, err := thinkingBudget(cfg.ThinkingConfig)
+	budget, enabled, err := manualThinkingBudget(cfg.ThinkingConfig)
 	if err != nil || !enabled {
 		return err
 	}
@@ -185,7 +186,7 @@ func convertGenerateContentConfig(params *anthropicapi.MessageNewParams, name st
 			// models use output_config.effort instead of budget_tokens.
 			configureAdaptiveThinking(params, capabilities, cfg.ThinkingConfig)
 		} else {
-			budget, enabled, err := thinkingBudget(cfg.ThinkingConfig)
+			budget, enabled, err := manualThinkingBudget(cfg.ThinkingConfig)
 			if err != nil {
 				return err
 			}
@@ -336,39 +337,33 @@ func validateResponseSchema(text string, cfg *genai.GenerateContentConfig) error
 	return nil
 }
 
-// thinkingBudget translates GenAI thinking settings only for Claude models
-// using manual extended thinking. ThinkingBudget takes precedence. The level
-// mapping below is an adapter heuristic, not an Anthropic-defined conversion:
-// 1024 is Anthropic's minimum budget, while 4096 and 10000 are chosen defaults.
-// A budget is not the billed token count; Claude may use fewer thinking tokens.
-func thinkingBudget(cfg *genai.ThinkingConfig) (int64, bool, error) {
-	if cfg.ThinkingBudget != nil {
-		switch budget := *cfg.ThinkingBudget; {
-		case budget == 0:
-			return 0, false, nil
-		case budget == -1:
-			return 10000, true, nil
-		case budget < 1024:
-			return 0, false, fmt.Errorf("Claude thinking budget must be at least 1024 tokens")
-		default:
-			return int64(budget), true, nil
-		}
-	}
+// manualThinkingBudget requires an explicit numeric budget for Claude models
+// using manual extended thinking. GenAI ThinkingLevel has no defined numeric
+// equivalent in Anthropic's manual mode, and -1 is not a fixed budget. A budget
+// is not the billed token count; Claude may use fewer thinking tokens.
+func manualThinkingBudget(cfg *genai.ThinkingConfig) (int64, bool, error) {
 	switch cfg.ThinkingLevel {
-	case genai.ThinkingLevelHigh:
-		return 10000, true, nil
-	case genai.ThinkingLevelMedium:
-		return 4096, true, nil
-	case genai.ThinkingLevelLow, genai.ThinkingLevelMinimal:
-		return 1024, true, nil
 	case "", genai.ThinkingLevelUnspecified:
+	default:
+		return 0, false, fmt.Errorf("Claude manual thinking does not support ThinkingLevel %q; use only an explicit ThinkingBudget", cfg.ThinkingLevel)
+	}
+	if cfg.ThinkingBudget == nil {
 		if cfg.IncludeThoughts {
-			return 10000, true, nil
+			return 0, false, fmt.Errorf("Claude manual thinking requires an explicit ThinkingBudget when IncludeThoughts is true")
 		}
 		return 0, false, nil
-	default:
-		return 0, false, fmt.Errorf("unsupported Claude thinking level %q", cfg.ThinkingLevel)
 	}
+	budget := *cfg.ThinkingBudget
+	if budget == 0 {
+		if cfg.IncludeThoughts {
+			return 0, false, fmt.Errorf("Claude manual thinking cannot include thoughts when ThinkingBudget is zero")
+		}
+		return 0, false, nil
+	}
+	if budget < 1024 {
+		return 0, false, fmt.Errorf("Claude manual thinking requires a fixed ThinkingBudget of at least 1024 tokens; got %d", budget)
+	}
+	return int64(budget), true, nil
 }
 
 func convertContent(content *genai.Content) (anthropicapi.MessageParam, error) {

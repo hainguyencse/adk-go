@@ -56,10 +56,14 @@ var _ adkmodel.GenerateContentConfigValidator = (*Model)(nil)
 //		return anthropic.NewModel(ctx, name, cfg)
 //	})
 //
+// The name is passed to Google Cloud's Claude Messages endpoint. A nonempty
+// name is required, but the endpoint decides whether that model ID is valid;
+// accepting a name here does not imply support for embeddings or other APIs.
+//
 // This package deliberately does not fall back to the direct Anthropic API.
 func NewModel(ctx context.Context, modelName string, cfg *Config) (adkmodel.LLM, error) {
-	if !strings.HasPrefix(modelName, "claude-") {
-		return nil, fmt.Errorf("Claude model ID is required")
+	if strings.TrimSpace(modelName) == "" {
+		return nil, fmt.Errorf("model name is required")
 	}
 	if cfg == nil {
 		cfg = &Config{}
