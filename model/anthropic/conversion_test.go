@@ -130,6 +130,82 @@ func TestStructuredOutputNeverExtractsDraft(t *testing.T) {
 	}
 }
 
+func TestStructuredOutputValidatesSchema(t *testing.T) {
+	configs := []struct {
+		name string
+		cfg  *genai.GenerateContentConfig
+	}{
+		{
+			name: "GenAI response schema",
+			cfg: &genai.GenerateContentConfig{ResponseSchema: &genai.Schema{
+				Type:     genai.TypeObject,
+				Required: []string{"answer"},
+				Properties: map[string]*genai.Schema{
+					"answer": {Type: genai.TypeString},
+				},
+			}},
+		},
+		{
+			name: "JSON response schema",
+			cfg: &genai.GenerateContentConfig{ResponseJsonSchema: map[string]any{
+				"type":     "object",
+				"required": []string{"answer"},
+				"properties": map[string]any{
+					"answer": map[string]any{"type": "string"},
+				},
+			}},
+		},
+	}
+	for _, config := range configs {
+		for _, test := range []struct {
+			name    string
+			text    string
+			wantErr bool
+		}{
+			{"required field missing", `{}`, true},
+			{"wrong field type", `{"answer":42}`, true},
+			{"matching schema", `{"answer":"ready"}`, false},
+		} {
+			t.Run(config.name+"/"+test.name, func(t *testing.T) {
+				message := &anthropicapi.Message{
+					Model:      "claude-sonnet-4-5",
+					StopReason: anthropicapi.StopReason("end_turn"),
+					Content: []anthropicapi.ContentBlockUnion{{
+						Type: "text", Text: test.text,
+					}},
+				}
+				response, err := toLLMResponse(message, config.cfg)
+				if (err != nil) != test.wantErr {
+					t.Fatalf("toLLMResponse() = (%+v, %v), want error %t", response, err, test.wantErr)
+				}
+				if test.wantErr && !strings.Contains(err.Error(), "does not match response schema") {
+					t.Fatalf("toLLMResponse() error = %v, want schema validation error", err)
+				}
+			})
+		}
+	}
+}
+
+func TestStructuredOutputAllowsGenAINullableField(t *testing.T) {
+	nullable := true
+	cfg := &genai.GenerateContentConfig{ResponseSchema: &genai.Schema{
+		Type: genai.TypeObject,
+		Properties: map[string]*genai.Schema{
+			"answer": {Type: genai.TypeString, Nullable: &nullable},
+		},
+	}}
+	message := &anthropicapi.Message{
+		Model:      "claude-sonnet-4-5",
+		StopReason: anthropicapi.StopReason("end_turn"),
+		Content: []anthropicapi.ContentBlockUnion{{
+			Type: "text", Text: `{"answer":null}`,
+		}},
+	}
+	if _, err := toLLMResponse(message, cfg); err != nil {
+		t.Fatalf("nullable field was rejected: %v", err)
+	}
+}
+
 func TestThoughtSignatureRoundTrip(t *testing.T) {
 	signature := "opaque-signature"
 	message := &anthropicapi.Message{

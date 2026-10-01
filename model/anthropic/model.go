@@ -128,7 +128,9 @@ func (m *Model) GenerateContent(ctx context.Context, req *adkmodel.LLMRequest, s
 				yield(nil, fmt.Errorf("accumulate Claude stream: %w", err))
 				return
 			}
-			if delta, ok := event.AsAny().(anthropicapi.ContentBlockDeltaEvent); ok {
+			// Do not expose partial structured JSON that may fail validation in
+			// the final snapshot; tool calls are still handled by that snapshot.
+			if delta, ok := event.AsAny().(anthropicapi.ContentBlockDeltaEvent); ok && !expectsJSONResponse(req.Config) {
 				if textDelta, ok := delta.Delta.AsAny().(anthropicapi.TextDelta); ok && textDelta.Text != "" {
 					if !yield(&adkmodel.LLMResponse{
 						Content: &genai.Content{Role: "model", Parts: []*genai.Part{genai.NewPartFromText(textDelta.Text)}},

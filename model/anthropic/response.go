@@ -64,11 +64,13 @@ func toLLMResponse(message *anthropicapi.Message, cfg *genai.GenerateContentConf
 		}
 	}
 
-	if cfg != nil && !hasToolCall &&
-		(cfg.ResponseSchema != nil || cfg.ResponseJsonSchema != nil || cfg.ResponseMIMEType == "application/json") {
+	if !hasToolCall && expectsJSONResponse(cfg) {
 		cleaned := stripWholeJSONFence(strings.TrimSpace(outputText.String()))
 		if !json.Valid([]byte(cleaned)) {
 			return nil, fmt.Errorf("Claude returned invalid JSON for structured output")
+		}
+		if err := validateResponseSchema(cleaned, cfg); err != nil {
+			return nil, err
 		}
 		var parts []*genai.Part
 		for _, part := range content.Parts {

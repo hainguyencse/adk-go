@@ -22,6 +22,7 @@ import (
 
 	anthropicapi "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/packages/param"
+	"github.com/google/jsonschema-go/jsonschema"
 	adkmodel "google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
@@ -77,28 +78,13 @@ func buildRequest(name string, req *adkmodel.LLMRequest) (anthropicapi.MessageNe
 				params.Thinking = anthropicapi.ThinkingConfigParamOfEnabled(budget)
 			}
 		}
-		if cfg.ResponseSchema != nil || cfg.ResponseJsonSchema != nil || cfg.ResponseMIMEType == "application/json" {
+		if expectsJSONResponse(cfg) {
 			instruction := "Return only valid JSON, with no Markdown fence or explanation."
-			var schema any
-			if cfg.ResponseJsonSchema != nil {
-				schema = cfg.ResponseJsonSchema
-			} else if cfg.ResponseSchema != nil {
-				schema = cfg.ResponseSchema
+			raw, err := normalizedResponseSchema(cfg)
+			if err != nil {
+				return params, err
 			}
-			if schema != nil {
-				raw, err := json.Marshal(schema)
-				if err != nil {
-					return params, fmt.Errorf("marshal response schema: %w", err)
-				}
-				var normalized any
-				if err := json.Unmarshal(raw, &normalized); err != nil {
-					return params, fmt.Errorf("decode response schema: %w", err)
-				}
-				normalizeSchemaTypes(normalized)
-				raw, err = json.Marshal(normalized)
-				if err != nil {
-					return params, fmt.Errorf("normalize response schema: %w", err)
-				}
+			if raw != nil {
 				instruction += " The JSON must match this schema: " + string(raw)
 			}
 			params.System = append(params.System, anthropicapi.TextBlockParam{Text: instruction})
@@ -136,6 +122,86 @@ func buildRequest(name string, req *adkmodel.LLMRequest) (anthropicapi.MessageNe
 		}
 	}
 	return params, nil
+}
+
+func expectsJSONResponse(cfg *genai.GenerateContentConfig) bool {
+	return cfg != nil && (cfg.ResponseSchema != nil || cfg.ResponseJsonSchema != nil || cfg.ResponseMIMEType == "application/json")
+}
+
+// normalizedResponseSchema keeps the prompt and local validation on the same
+// schema. GenAI Schema uses uppercase type names, unlike JSON Schema.
+func normalizedResponseSchema(cfg *genai.GenerateContentConfig) ([]byte, error) {
+	if cfg == nil {
+		return nil, nil
+	}
+	var source any
+	if cfg.ResponseJsonSchema != nil {
+		source = cfg.ResponseJsonSchema
+	} else if cfg.ResponseSchema != nil {
+		source = cfg.ResponseSchema
+	} else {
+		return nil, nil
+	}
+	raw, err := json.Marshal(source)
+	if err != nil {
+		return nil, fmt.Errorf("marshal response schema: %w", err)
+	}
+	var normalized any
+	if err := json.Unmarshal(raw, &normalized); err != nil {
+		return nil, fmt.Errorf("decode response schema: %w", err)
+	}
+	normalizeSchemaTypes(normalized)
+	normalizeNullableSchemaTypes(normalized)
+	raw, err = json.Marshal(normalized)
+	if err != nil {
+		return nil, fmt.Errorf("normalize response schema: %w", err)
+	}
+	return raw, nil
+}
+
+func normalizeNullableSchemaTypes(value any) {
+	switch v := value.(type) {
+	case map[string]any:
+		if nullable, _ := v["nullable"].(bool); nullable {
+			if typ, ok := v["type"].(string); ok && typ != "" && typ != "null" {
+				v["type"] = []any{typ, "null"}
+			}
+			delete(v, "nullable")
+		}
+		for _, child := range v {
+			normalizeNullableSchemaTypes(child)
+		}
+	case []any:
+		for _, child := range v {
+			normalizeNullableSchemaTypes(child)
+		}
+	}
+}
+
+func validateResponseSchema(text string, cfg *genai.GenerateContentConfig) error {
+	raw, err := normalizedResponseSchema(cfg)
+	if err != nil {
+		return err
+	}
+	if raw == nil {
+		return nil
+	}
+	var schema jsonschema.Schema
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		return fmt.Errorf("decode response schema for validation: %w", err)
+	}
+	resolved, err := schema.Resolve(nil)
+	if err != nil {
+		return fmt.Errorf("resolve response schema: %w", err)
+	}
+	var value any
+	if err := json.Unmarshal([]byte(text), &value); err != nil {
+		return fmt.Errorf("decode Claude JSON response: %w", err)
+	}
+	if err := resolved.Validate(value); err != nil {
+		return fmt.Errorf("Claude JSON response does not match response schema: %w", err)
+	}
+	return nil
 }
 
 func thinkingBudget(cfg *genai.ThinkingConfig) (int64, bool, error) {
