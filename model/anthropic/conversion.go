@@ -181,6 +181,8 @@ func convertGenerateContentConfig(params *anthropicapi.MessageNewParams, name st
 	}
 	if cfg.ThinkingConfig != nil {
 		if capabilities.adaptiveThinking {
+			// Anthropic does not accept GenAI ThinkingLevel directly. Adaptive
+			// models use output_config.effort instead of budget_tokens.
 			configureAdaptiveThinking(params, capabilities, cfg.ThinkingConfig)
 		} else {
 			budget, enabled, err := thinkingBudget(cfg.ThinkingConfig)
@@ -189,6 +191,8 @@ func convertGenerateContentConfig(params *anthropicapi.MessageNewParams, name st
 			}
 			if enabled {
 				if cfg.MaxOutputTokens == 0 && params.MaxTokens <= budget {
+					// Leave answer-token headroom above the manual thinking budget.
+					// The extra 2048 tokens are an adapter default, not an API rule.
 					params.MaxTokens = budget + 2048
 				}
 				params.Thinking = anthropicapi.ThinkingConfigParamOfEnabled(budget)
@@ -214,6 +218,10 @@ func convertGenerateContentConfig(params *anthropicapi.MessageNewParams, name st
 	return nil
 }
 
+// configureAdaptiveThinking maps GenAI's level to Anthropic's effort, which is
+// soft guidance rather than a fixed thinking-token budget. In both adaptive
+// and manual modes, generated thinking tokens are billed as output tokens even
+// when the response shows only a summary or omits the thinking text.
 func configureAdaptiveThinking(params *anthropicapi.MessageNewParams, capabilities claudeModelCapabilities, cfg *genai.ThinkingConfig) {
 	if cfg.ThinkingBudget != nil && *cfg.ThinkingBudget == 0 {
 		if capabilities.thinkingOnByDefault {
@@ -328,6 +336,11 @@ func validateResponseSchema(text string, cfg *genai.GenerateContentConfig) error
 	return nil
 }
 
+// thinkingBudget translates GenAI thinking settings only for Claude models
+// using manual extended thinking. ThinkingBudget takes precedence. The level
+// mapping below is an adapter heuristic, not an Anthropic-defined conversion:
+// 1024 is Anthropic's minimum budget, while 4096 and 10000 are chosen defaults.
+// A budget is not the billed token count; Claude may use fewer thinking tokens.
 func thinkingBudget(cfg *genai.ThinkingConfig) (int64, bool, error) {
 	if cfg.ThinkingBudget != nil {
 		switch budget := *cfg.ThinkingBudget; {
