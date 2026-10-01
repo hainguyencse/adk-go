@@ -43,6 +43,7 @@ type Model struct {
 }
 
 var _ adkmodel.LLM = (*Model)(nil)
+var _ adkmodel.GenerateContentConfigValidator = (*Model)(nil)
 
 // NewModel returns an ADK model backed by Claude on Google Cloud Vertex AI.
 //
@@ -93,6 +94,12 @@ func NewModel(ctx context.Context, modelName string, cfg *Config) (adkmodel.LLM,
 }
 
 func (m *Model) Name() string { return m.name }
+
+// ValidateGenerateContentConfig checks options that can be rejected before ADK
+// assembles the final request. GenerateContent validates again after assembly.
+func (m *Model) ValidateGenerateContentConfig(cfg *genai.GenerateContentConfig) error {
+	return ValidateGenerateContentConfig(m.name, cfg)
+}
 
 // The current ADK fork includes Connect in model.LLM. Claude's Messages API
 // does not implement the Gemini Live protocol used by the app's audio agents.

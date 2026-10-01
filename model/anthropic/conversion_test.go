@@ -15,6 +15,7 @@
 package anthropic
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -23,6 +24,149 @@ import (
 	adkmodel "google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
+
+func TestValidateGenerateContentConfig(t *testing.T) {
+	tests := []struct {
+		name      string
+		modelName string
+		config    *genai.GenerateContentConfig
+		wantError string
+	}{
+		{name: "nil config", modelName: "claude-opus-4-7"},
+		{
+			name:      "adaptive thinking",
+			modelName: "claude-opus-4-7",
+			config: &genai.GenerateContentConfig{ThinkingConfig: &genai.ThinkingConfig{
+				ThinkingLevel: genai.ThinkingLevelMedium, IncludeThoughts: true,
+			}},
+		},
+		{
+			name:      "explicit zero temperature",
+			modelName: "claude-opus-4-7",
+			config:    &genai.GenerateContentConfig{Temperature: genai.Ptr(float32(0))},
+			wantError: "does not support explicit Temperature",
+		},
+		{
+			name:      "top p",
+			modelName: "claude-opus-4-7",
+			config:    &genai.GenerateContentConfig{TopP: genai.Ptr(float32(0.5))},
+			wantError: "does not support explicit TopP",
+		},
+		{
+			name:      "top k",
+			modelName: "claude-opus-4-7",
+			config:    &genai.GenerateContentConfig{TopK: genai.Ptr(float32(1))},
+			wantError: "does not support explicit TopK",
+		},
+		{
+			name:      "fixed adaptive budget",
+			modelName: "claude-opus-4-7",
+			config: &genai.GenerateContentConfig{ThinkingConfig: &genai.ThinkingConfig{
+				ThinkingBudget: genai.Ptr(int32(2048)),
+			}},
+			wantError: "does not support fixed ThinkingBudget",
+		},
+		{
+			name:      "manual budget exceeds output",
+			modelName: "claude-sonnet-4-5",
+			config: &genai.GenerateContentConfig{
+				MaxOutputTokens: 2048,
+				ThinkingConfig:  &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(2048))},
+			},
+			wantError: "must be less than max output tokens",
+		},
+		{
+			name:      "unknown model with options",
+			modelName: "claude-opus-6",
+			config:    &genai.GenerateContentConfig{Temperature: genai.Ptr(float32(0.5))},
+			wantError: "no declared thinking and sampling capabilities",
+		},
+		{name: "unknown model without special options", modelName: "claude-opus-6", config: &genai.GenerateContentConfig{}},
+		{name: "not a Claude model", modelName: "gemini-2.5-flash", wantError: "Claude model ID is required"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateGenerateContentConfig(tt.modelName, tt.config)
+			if tt.wantError == "" && err != nil {
+				t.Fatalf("ValidateGenerateContentConfig() error = %v, want nil", err)
+			}
+			if tt.wantError != "" && (err == nil || !strings.Contains(err.Error(), tt.wantError)) {
+				t.Fatalf("ValidateGenerateContentConfig() error = %v, want %q", err, tt.wantError)
+			}
+
+			if strings.HasPrefix(tt.modelName, "claude-") {
+				_, requestErr := buildRequest(tt.modelName, &adkmodel.LLMRequest{Config: tt.config})
+				if (err == nil) != (requestErr == nil) || (err != nil && err.Error() != requestErr.Error()) {
+					t.Fatalf("preflight error = %v, request error = %v", err, requestErr)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateGenerateContentConfigDoesNotMutateInput(t *testing.T) {
+	cfg := &genai.GenerateContentConfig{
+		SystemInstruction: &genai.Content{Parts: []*genai.Part{{Text: "Be concise."}}},
+		ThinkingConfig: &genai.ThinkingConfig{
+			ThinkingLevel: genai.ThinkingLevelMedium,
+		},
+		ToolConfig: &genai.ToolConfig{
+			FunctionCallingConfig: &genai.FunctionCallingConfig{Mode: genai.FunctionCallingConfigModeAny},
+		},
+	}
+	before, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateGenerateContentConfig("claude-opus-4-7", cfg); err != nil {
+		t.Fatal(err)
+	}
+	after, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("validation changed config:\nbefore: %s\nafter:  %s", before, after)
+	}
+}
+
+func TestModelValidateGenerateContentConfig(t *testing.T) {
+	m := &Model{name: "claude-opus-4-7"}
+	err := m.ValidateGenerateContentConfig(&genai.GenerateContentConfig{
+		Temperature: genai.Ptr(float32(0.5)),
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not support explicit Temperature") {
+		t.Fatalf("Model.ValidateGenerateContentConfig() error = %v, want unsupported Temperature", err)
+	}
+}
+
+func TestGenerateContentRevalidatesRequestConfig(t *testing.T) {
+	m := &Model{name: "claude-opus-4-7"}
+	req := &adkmodel.LLMRequest{Config: &genai.GenerateContentConfig{
+		Temperature: genai.Ptr(float32(0)),
+	}}
+	for response, err := range m.GenerateContent(context.Background(), req, false) {
+		if response != nil || err == nil || !strings.Contains(err.Error(), "does not support explicit Temperature") {
+			t.Fatalf("GenerateContent() = (%+v, %v), want local config error", response, err)
+		}
+		return
+	}
+	t.Fatal("GenerateContent() returned no response or error")
+}
+
+func TestValidateGenerateContentConfigDefersUnpopulatedToolChoice(t *testing.T) {
+	cfg := &genai.GenerateContentConfig{ToolConfig: &genai.ToolConfig{
+		FunctionCallingConfig: &genai.FunctionCallingConfig{Mode: genai.FunctionCallingConfigModeAny},
+	}}
+	if err := ValidateGenerateContentConfig("claude-opus-4-7", cfg); err != nil {
+		t.Fatalf("preflight rejected tools that ADK has not attached yet: %v", err)
+	}
+	_, err := buildRequest("claude-opus-4-7", &adkmodel.LLMRequest{Config: cfg})
+	if err == nil || !strings.Contains(err.Error(), "ANY has no eligible function declarations") {
+		t.Fatalf("final request error = %v, want missing tool declarations", err)
+	}
+}
 
 func TestHighThinkingRaisesDefaultMaxTokens(t *testing.T) {
 	req := &adkmodel.LLMRequest{Config: &genai.GenerateContentConfig{

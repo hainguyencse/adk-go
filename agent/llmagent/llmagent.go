@@ -33,6 +33,12 @@ import (
 
 // New is a constructor for LLMAgent.
 func New(cfg Config) (agent.Agent, error) {
+	if validator, ok := cfg.Model.(model.GenerateContentConfigValidator); ok {
+		if err := validator.ValidateGenerateContentConfig(cfg.GenerateContentConfig); err != nil {
+			return nil, fmt.Errorf("agent %q: invalid generation config for model %q: %w", cfg.Name, cfg.Model.Name(), err)
+		}
+	}
+
 	beforeModelCallbacks := make([]llminternal.BeforeModelCallback, 0, len(cfg.BeforeModelCallbacks))
 	for _, c := range cfg.BeforeModelCallbacks {
 		beforeModelCallbacks = append(beforeModelCallbacks, llminternal.BeforeModelCallback(c))

@@ -39,6 +39,59 @@ import (
 
 const modelName = "gemini-2.5-flash"
 
+type validatingMockModel struct {
+	*testutil.MockModel
+	validatedConfig *genai.GenerateContentConfig
+	validationCalls int
+	validationErr   error
+}
+
+func (m *validatingMockModel) ValidateGenerateContentConfig(cfg *genai.GenerateContentConfig) error {
+	m.validatedConfig = cfg
+	m.validationCalls++
+	return m.validationErr
+}
+
+func TestNewValidatesOptionalModelConfig(t *testing.T) {
+	wantErr := errors.New("unsupported model option")
+	config := &genai.GenerateContentConfig{Temperature: genai.Ptr(float32(0.5))}
+	modelWithValidator := &validatingMockModel{
+		MockModel:     &testutil.MockModel{},
+		validationErr: wantErr,
+	}
+	agent, err := llmagent.New(llmagent.Config{
+		Name:                  "validated_agent",
+		Model:                 modelWithValidator,
+		GenerateContentConfig: config,
+	})
+	if agent != nil || !errors.Is(err, wantErr) {
+		t.Fatalf("llmagent.New() = (%v, %v), want (nil, %v)", agent, err, wantErr)
+	}
+	if modelWithValidator.validationCalls != 1 || modelWithValidator.validatedConfig != config {
+		t.Fatalf("validator called %d times with %p, want once with %p", modelWithValidator.validationCalls, modelWithValidator.validatedConfig, config)
+	}
+
+	modelWithValidator.validationErr = nil
+	if _, err := llmagent.New(llmagent.Config{
+		Name:                  "validated_agent",
+		Model:                 modelWithValidator,
+		GenerateContentConfig: config,
+	}); err != nil {
+		t.Fatalf("llmagent.New() with valid config: %v", err)
+	}
+	if modelWithValidator.validationCalls != 2 {
+		t.Fatalf("validator called %d times, want twice", modelWithValidator.validationCalls)
+	}
+
+	if _, err := llmagent.New(llmagent.Config{
+		Name:                  "model_without_validator",
+		Model:                 &testutil.MockModel{},
+		GenerateContentConfig: config,
+	}); err != nil {
+		t.Fatalf("llmagent.New() with ordinary model: %v", err)
+	}
+}
+
 func TestPlanner(t *testing.T) {
 	t.Parallel()
 

@@ -29,95 +29,100 @@ import (
 
 const redactedSignaturePrefix = "anthropic:redacted:"
 
+// ValidateGenerateContentConfig checks Claude-specific options known before ADK
+// builds a request. It does not modify cfg or create Anthropic request params.
+// ADK can add tools and content later; those are checked during conversion.
+func ValidateGenerateContentConfig(modelName string, cfg *genai.GenerateContentConfig) error {
+	if !strings.HasPrefix(modelName, "claude-") {
+		return fmt.Errorf("Claude model ID is required")
+	}
+	if cfg == nil {
+		return nil
+	}
+	capabilities, known := capabilitiesForModel(modelName)
+	if !known && (cfg.ThinkingConfig != nil || cfg.Temperature != nil || cfg.TopP != nil || cfg.TopK != nil) {
+		return fmt.Errorf("Claude model %q has no declared thinking and sampling capabilities", modelName)
+	}
+	if capabilities.rejectSampling {
+		for _, field := range []struct {
+			name string
+			set  bool
+		}{
+			{"Temperature", cfg.Temperature != nil},
+			{"TopP", cfg.TopP != nil},
+			{"TopK", cfg.TopK != nil},
+		} {
+			if field.set {
+				return fmt.Errorf("Claude model %q does not support explicit %s; omit the field", modelName, field.name)
+			}
+		}
+	}
+	if cfg.SystemInstruction != nil {
+		for _, part := range cfg.SystemInstruction.Parts {
+			if part != nil && part.Text == "" {
+				return fmt.Errorf("Claude system instruction only supports text")
+			}
+		}
+	}
+	if cfg.ThinkingConfig == nil {
+		return nil
+	}
+	if capabilities.adaptiveThinking {
+		return validateAdaptiveThinkingConfig(modelName, capabilities, cfg.ThinkingConfig)
+	}
+	budget, enabled, err := thinkingBudget(cfg.ThinkingConfig)
+	if err != nil || !enabled {
+		return err
+	}
+	maxTokens := int64(4096)
+	if cfg.MaxOutputTokens > 0 {
+		maxTokens = int64(cfg.MaxOutputTokens)
+	} else if maxTokens <= budget {
+		maxTokens = budget + 2048
+	}
+	if budget >= maxTokens {
+		return fmt.Errorf("Claude thinking budget %d must be less than max output tokens %d", budget, maxTokens)
+	}
+	return nil
+}
+
+func validateAdaptiveThinkingConfig(name string, capabilities claudeModelCapabilities, cfg *genai.ThinkingConfig) error {
+	if cfg.ThinkingBudget != nil {
+		switch budget := *cfg.ThinkingBudget; budget {
+		case 0:
+			if capabilities.thinkingOnByDefault && !capabilities.canDisableThinking {
+				return fmt.Errorf("Claude model %q does not support disabling thinking", name)
+			}
+			return nil
+		case -1:
+			// GenAI's dynamic budget maps to Anthropic's adaptive mode.
+		default:
+			return fmt.Errorf("Claude model %q does not support fixed ThinkingBudget %d; use ThinkingLevel instead", name, budget)
+		}
+	}
+	switch cfg.ThinkingLevel {
+	case genai.ThinkingLevelHigh, genai.ThinkingLevelMedium,
+		genai.ThinkingLevelLow, genai.ThinkingLevelMinimal,
+		"", genai.ThinkingLevelUnspecified:
+		return nil
+	default:
+		return fmt.Errorf("unsupported Claude thinking level %q", cfg.ThinkingLevel)
+	}
+}
+
 func buildRequest(name string, req *adkmodel.LLMRequest) (anthropicapi.MessageNewParams, error) {
 	if req == nil {
 		return anthropicapi.MessageNewParams{}, fmt.Errorf("nil ADK LLM request")
+	}
+	if err := ValidateGenerateContentConfig(name, req.Config); err != nil {
+		return anthropicapi.MessageNewParams{}, err
 	}
 	params := anthropicapi.MessageNewParams{
 		Model:     anthropicapi.Model(name),
 		MaxTokens: 4096,
 	}
-	if req.Config != nil {
-		cfg := req.Config
-		capabilities, known := capabilitiesForModel(name)
-		if !known && (cfg.ThinkingConfig != nil || cfg.Temperature != nil || cfg.TopP != nil || cfg.TopK != nil) {
-			return params, fmt.Errorf("Claude model %q has no declared thinking and sampling capabilities", name)
-		}
-		if capabilities.rejectSampling {
-			for _, field := range []struct {
-				name string
-				set  bool
-			}{
-				{"Temperature", cfg.Temperature != nil},
-				{"TopP", cfg.TopP != nil},
-				{"TopK", cfg.TopK != nil},
-			} {
-				if field.set {
-					return params, fmt.Errorf("Claude model %q does not support explicit %s; omit the field", name, field.name)
-				}
-			}
-		}
-		if cfg.MaxOutputTokens > 0 {
-			params.MaxTokens = int64(cfg.MaxOutputTokens)
-		}
-		params.StopSequences = cfg.StopSequences
-		if cfg.Temperature != nil {
-			params.Temperature = param.NewOpt(float64(*cfg.Temperature))
-		}
-		if cfg.TopP != nil {
-			params.TopP = param.NewOpt(float64(*cfg.TopP))
-		}
-		if cfg.TopK != nil {
-			params.TopK = param.NewOpt(int64(*cfg.TopK))
-		}
-		if cfg.SystemInstruction != nil {
-			for _, part := range cfg.SystemInstruction.Parts {
-				if part == nil {
-					continue
-				}
-				if part.Text == "" {
-					return params, fmt.Errorf("Claude system instruction only supports text")
-				}
-				params.System = append(params.System, anthropicapi.TextBlockParam{Text: part.Text})
-			}
-		}
-		if cfg.ThinkingConfig != nil {
-			if capabilities.adaptiveThinking {
-				if err := configureAdaptiveThinking(&params, name, capabilities, cfg.ThinkingConfig); err != nil {
-					return params, err
-				}
-			} else {
-				budget, enabled, err := thinkingBudget(cfg.ThinkingConfig)
-				if err != nil {
-					return params, err
-				}
-				if enabled {
-					if cfg.MaxOutputTokens == 0 && params.MaxTokens <= budget {
-						params.MaxTokens = budget + 2048
-					}
-					if budget >= params.MaxTokens {
-						return params, fmt.Errorf("Claude thinking budget %d must be less than max output tokens %d", budget, params.MaxTokens)
-					}
-					params.Thinking = anthropicapi.ThinkingConfigParamOfEnabled(budget)
-				}
-			}
-		}
-		if expectsJSONResponse(cfg) {
-			instruction := "Return only valid JSON, with no Markdown fence or explanation."
-			raw, err := normalizedResponseSchema(cfg)
-			if err != nil {
-				return params, err
-			}
-			if raw != nil {
-				instruction += " The JSON must match this schema: " + string(raw)
-			}
-			params.System = append(params.System, anthropicapi.TextBlockParam{Text: instruction})
-		}
-		var err error
-		params.Tools, params.ToolChoice, err = convertTools(cfg)
-		if err != nil {
-			return params, err
-		}
+	if err := convertGenerateContentConfig(&params, name, req.Config); err != nil {
+		return params, err
 	}
 
 	for _, content := range req.Contents {
@@ -148,25 +153,76 @@ func buildRequest(name string, req *adkmodel.LLMRequest) (anthropicapi.MessageNe
 	return params, nil
 }
 
-func configureAdaptiveThinking(params *anthropicapi.MessageNewParams, name string, capabilities claudeModelCapabilities, cfg *genai.ThinkingConfig) error {
-	if cfg.ThinkingBudget != nil {
-		switch budget := *cfg.ThinkingBudget; budget {
-		case 0:
-			if capabilities.thinkingOnByDefault {
-				if !capabilities.canDisableThinking {
-					return fmt.Errorf("Claude model %q does not support disabling thinking", name)
-				}
-				params.Thinking = anthropicapi.ThinkingConfigParamUnion{
-					OfDisabled: &anthropicapi.ThinkingConfigDisabledParam{},
-				}
+func convertGenerateContentConfig(params *anthropicapi.MessageNewParams, name string, cfg *genai.GenerateContentConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	capabilities, _ := capabilitiesForModel(name)
+	if cfg.MaxOutputTokens > 0 {
+		params.MaxTokens = int64(cfg.MaxOutputTokens)
+	}
+	params.StopSequences = cfg.StopSequences
+	if cfg.Temperature != nil {
+		params.Temperature = param.NewOpt(float64(*cfg.Temperature))
+	}
+	if cfg.TopP != nil {
+		params.TopP = param.NewOpt(float64(*cfg.TopP))
+	}
+	if cfg.TopK != nil {
+		params.TopK = param.NewOpt(int64(*cfg.TopK))
+	}
+	if cfg.SystemInstruction != nil {
+		for _, part := range cfg.SystemInstruction.Parts {
+			if part == nil {
+				continue
 			}
-			// Omitting thinking turns it off on Claude Opus 4.7 and 4.8.
-			return nil
-		case -1:
-			// GenAI's dynamic budget maps to Anthropic's adaptive mode.
-		default:
-			return fmt.Errorf("Claude model %q does not support fixed ThinkingBudget %d; use ThinkingLevel instead", name, budget)
+			params.System = append(params.System, anthropicapi.TextBlockParam{Text: part.Text})
 		}
+	}
+	if cfg.ThinkingConfig != nil {
+		if capabilities.adaptiveThinking {
+			configureAdaptiveThinking(params, capabilities, cfg.ThinkingConfig)
+		} else {
+			budget, enabled, err := thinkingBudget(cfg.ThinkingConfig)
+			if err != nil {
+				return err
+			}
+			if enabled {
+				if cfg.MaxOutputTokens == 0 && params.MaxTokens <= budget {
+					params.MaxTokens = budget + 2048
+				}
+				params.Thinking = anthropicapi.ThinkingConfigParamOfEnabled(budget)
+			}
+		}
+	}
+	if expectsJSONResponse(cfg) {
+		instruction := "Return only valid JSON, with no Markdown fence or explanation."
+		raw, err := normalizedResponseSchema(cfg)
+		if err != nil {
+			return err
+		}
+		if raw != nil {
+			instruction += " The JSON must match this schema: " + string(raw)
+		}
+		params.System = append(params.System, anthropicapi.TextBlockParam{Text: instruction})
+	}
+	var err error
+	params.Tools, params.ToolChoice, err = convertTools(cfg)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func configureAdaptiveThinking(params *anthropicapi.MessageNewParams, capabilities claudeModelCapabilities, cfg *genai.ThinkingConfig) {
+	if cfg.ThinkingBudget != nil && *cfg.ThinkingBudget == 0 {
+		if capabilities.thinkingOnByDefault {
+			params.Thinking = anthropicapi.ThinkingConfigParamUnion{
+				OfDisabled: &anthropicapi.ThinkingConfigDisabledParam{},
+			}
+		}
+		// Omitting thinking turns it off on Claude Opus 4.7 and 4.8.
+		return
 	}
 
 	var effort anthropicapi.OutputConfigEffort
@@ -180,10 +236,8 @@ func configureAdaptiveThinking(params *anthropicapi.MessageNewParams, name strin
 		effort = anthropicapi.OutputConfigEffortLow
 	case "", genai.ThinkingLevelUnspecified:
 		if !cfg.IncludeThoughts && cfg.ThinkingBudget == nil {
-			return nil
+			return
 		}
-	default:
-		return fmt.Errorf("unsupported Claude thinking level %q", cfg.ThinkingLevel)
 	}
 
 	adaptive := &anthropicapi.ThinkingConfigAdaptiveParam{}
@@ -192,7 +246,6 @@ func configureAdaptiveThinking(params *anthropicapi.MessageNewParams, name strin
 	}
 	params.Thinking = anthropicapi.ThinkingConfigParamUnion{OfAdaptive: adaptive}
 	params.OutputConfig.Effort = effort
-	return nil
 }
 
 func expectsJSONResponse(cfg *genai.GenerateContentConfig) bool {

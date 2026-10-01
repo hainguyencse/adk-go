@@ -29,6 +29,13 @@ type LLM interface {
 	Connect(ctx context.Context, req *LLMRequest) (LiveConnection, error)
 }
 
+// GenerateContentConfigValidator is an optional capability for models that can
+// check agent generation settings before a request is built. Models must still
+// validate the final request, which ADK processors and callbacks may change.
+type GenerateContentConfigValidator interface {
+	ValidateGenerateContentConfig(cfg *genai.GenerateContentConfig) error
+}
+
 // LLMRequest is the raw LLM request.
 type LLMRequest struct {
 	Model             string
