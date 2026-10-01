@@ -42,6 +42,170 @@ func TestHighThinkingRaisesDefaultMaxTokens(t *testing.T) {
 	}
 }
 
+func TestOpus47EmptyConfigOmitsThinking(t *testing.T) {
+	params, err := buildRequest("claude-opus-4-7", &adkmodel.LLMRequest{Config: &genai.GenerateContentConfig{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params.MaxTokens != 4096 || params.Thinking.OfAdaptive != nil || params.Thinking.OfEnabled != nil {
+		t.Fatalf("empty config changed default output or enabled thinking: %+v", params)
+	}
+}
+
+func TestOpus47UsesAdaptiveThinking(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		model  string
+		level  genai.ThinkingLevel
+		budget *int32
+		want   anthropicapi.OutputConfigEffort
+	}{
+		{name: "Opus 4.7 high", model: "claude-opus-4-7", level: genai.ThinkingLevelHigh, want: anthropicapi.OutputConfigEffortHigh},
+		{name: "Opus 4.8 medium", model: "claude-opus-4-8", level: genai.ThinkingLevelMedium, want: anthropicapi.OutputConfigEffortMedium},
+		{name: "Opus 5 low", model: "claude-opus-5", level: genai.ThinkingLevelLow, want: anthropicapi.OutputConfigEffortLow},
+		{name: "minimal approximates low", model: "claude-opus-4-7", level: genai.ThinkingLevelMinimal, want: anthropicapi.OutputConfigEffortLow},
+		{name: "dynamic budget", model: "claude-opus-4-7", budget: genai.Ptr(int32(-1))},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			params, err := buildRequest(tt.model, &adkmodel.LLMRequest{Config: &genai.GenerateContentConfig{
+				MaxOutputTokens: 8192,
+				ThinkingConfig:  &genai.ThinkingConfig{ThinkingLevel: tt.level, ThinkingBudget: tt.budget},
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if params.Thinking.OfAdaptive == nil || params.Thinking.OfEnabled != nil || params.OutputConfig.Effort != tt.want {
+				t.Fatalf("wrong adaptive thinking config: %+v, effort %q", params.Thinking, params.OutputConfig.Effort)
+			}
+			if params.MaxTokens != 8192 {
+				t.Fatalf("max tokens = %d, want 8192", params.MaxTokens)
+			}
+			encoded, err := json.Marshal(params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(encoded), "budget_tokens") || !strings.Contains(string(encoded), `"type":"adaptive"`) {
+				t.Fatalf("invalid Opus request: %s", encoded)
+			}
+		})
+	}
+}
+
+func TestOpus47IncludeThoughtsRequestsSummary(t *testing.T) {
+	params, err := buildRequest("claude-opus-4-7", &adkmodel.LLMRequest{Config: &genai.GenerateContentConfig{
+		ThinkingConfig: &genai.ThinkingConfig{IncludeThoughts: true},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params.Thinking.OfAdaptive == nil ||
+		params.Thinking.OfAdaptive.Display != anthropicapi.ThinkingConfigAdaptiveDisplaySummarized ||
+		params.MaxTokens != 4096 {
+		t.Fatalf("IncludeThoughts must use summarized adaptive thinking without changing max tokens: %+v", params)
+	}
+}
+
+func TestOpus47ThinkingBudget(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		budget       int32
+		wantAdaptive bool
+		wantError    bool
+	}{
+		{name: "zero disables thinking", budget: 0},
+		{name: "dynamic enables adaptive thinking", budget: -1, wantAdaptive: true},
+		{name: "fixed budget is unsupported", budget: 2048, wantError: true},
+		{name: "invalid negative budget", budget: -2, wantError: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			params, err := buildRequest("claude-opus-4-7", &adkmodel.LLMRequest{Config: &genai.GenerateContentConfig{
+				ThinkingConfig: &genai.ThinkingConfig{ThinkingBudget: &tt.budget},
+			}})
+			if (err != nil) != tt.wantError {
+				t.Fatalf("buildRequest() error = %v, want error %t", err, tt.wantError)
+			}
+			if tt.wantError {
+				if !strings.Contains(err.Error(), "fixed ThinkingBudget") {
+					t.Fatalf("error does not explain unsupported budget: %v", err)
+				}
+				return
+			}
+			if (params.Thinking.OfAdaptive != nil) != tt.wantAdaptive {
+				t.Fatalf("adaptive thinking = %+v, want %t", params.Thinking, tt.wantAdaptive)
+			}
+		})
+	}
+}
+
+func TestDefaultOnModelsHandleDisabledThinking(t *testing.T) {
+	zero := int32(0)
+	for _, tt := range []struct {
+		model       string
+		wantDisable bool
+		wantError   bool
+	}{
+		{model: "claude-opus-5", wantDisable: true},
+		{model: "claude-sonnet-5", wantDisable: true},
+		{model: "claude-fable-5", wantError: true},
+	} {
+		t.Run(tt.model, func(t *testing.T) {
+			params, err := buildRequest(tt.model, &adkmodel.LLMRequest{Config: &genai.GenerateContentConfig{
+				ThinkingConfig: &genai.ThinkingConfig{ThinkingBudget: &zero},
+			}})
+			if (err != nil) != tt.wantError {
+				t.Fatalf("buildRequest() error = %v, want error %t", err, tt.wantError)
+			}
+			if tt.wantError {
+				if !strings.Contains(err.Error(), "does not support disabling thinking") {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if (params.Thinking.OfDisabled != nil) != tt.wantDisable {
+				t.Fatalf("disabled thinking = %+v, want %t", params.Thinking, tt.wantDisable)
+			}
+			encoded, err := json.Marshal(params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(encoded), `"type":"disabled"`) {
+				t.Fatalf("disabled thinking was not serialized: %s", encoded)
+			}
+		})
+	}
+}
+
+func TestOpus47RejectsExplicitSampling(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		cfg  *genai.GenerateContentConfig
+	}{
+		{name: "Temperature", cfg: &genai.GenerateContentConfig{Temperature: genai.Ptr(float32(0))}},
+		{name: "TopP", cfg: &genai.GenerateContentConfig{TopP: genai.Ptr(float32(0.5))}},
+		{name: "TopK", cfg: &genai.GenerateContentConfig{TopK: genai.Ptr(float32(1))}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := buildRequest("claude-opus-4-7", &adkmodel.LLMRequest{Config: tt.cfg})
+			if err == nil || !strings.Contains(err.Error(), tt.name) || !strings.Contains(err.Error(), "omit the field") {
+				t.Fatalf("buildRequest() error = %v, want clear %s rejection", err, tt.name)
+			}
+		})
+	}
+}
+
+func TestUnknownClaudeModelRequiresCapabilityReviewForThinking(t *testing.T) {
+	for _, name := range []string{"claude-opus-6", "claude-opus-5-5"} {
+		t.Run(name, func(t *testing.T) {
+			_, err := buildRequest(name, &adkmodel.LLMRequest{Config: &genai.GenerateContentConfig{
+				ThinkingConfig: &genai.ThinkingConfig{IncludeThoughts: true},
+			}})
+			if err == nil || !strings.Contains(err.Error(), "no declared thinking and sampling capabilities") {
+				t.Fatalf("buildRequest() error = %v, want capability review", err)
+			}
+		})
+	}
+}
+
 func TestToolModeNoneRemovesTools(t *testing.T) {
 	req := &adkmodel.LLMRequest{Config: &genai.GenerateContentConfig{
 		Tools: []*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{{

@@ -78,6 +78,53 @@ func TestGenerateContentCallsSDKAndConvertsResponse(t *testing.T) {
 	}
 }
 
+func TestGenerateContentOpus47SendsAdaptiveThinking(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Thinking struct {
+				Type    string `json:"type"`
+				Display string `json:"display"`
+			} `json:"thinking"`
+			OutputConfig struct {
+				Effort string `json:"effort"`
+			} `json:"output_config"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode Claude request: %v", err)
+		}
+		if body.Thinking.Type != "adaptive" || body.Thinking.Display != "summarized" || body.OutputConfig.Effort != "high" {
+			t.Errorf("wrong Claude thinking request: %+v", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"msg_test","type":"message","role":"assistant","model":"claude-opus-4-7","content":[{"type":"text","text":"Hello"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":3,"output_tokens":2}}`)
+	}))
+	defer server.Close()
+	m := &Model{
+		name: "claude-opus-4-7",
+		client: anthropicapi.NewMessageService(
+			option.WithBaseURL(server.URL),
+			option.WithAPIKey("test-only"),
+		),
+	}
+	req := &adkmodel.LLMRequest{
+		Contents: []*genai.Content{genai.NewContentFromText("hello Claude", genai.RoleUser)},
+		Config: &genai.GenerateContentConfig{ThinkingConfig: &genai.ThinkingConfig{
+			ThinkingLevel:   genai.ThinkingLevelHigh,
+			IncludeThoughts: true,
+		}},
+	}
+	var response *adkmodel.LLMResponse
+	for got, err := range m.GenerateContent(context.Background(), req, false) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		response = got
+	}
+	if response == nil || response.Content == nil || response.Content.Parts[0].Text != "Hello" {
+		t.Fatalf("unexpected ADK response: %+v", response)
+	}
+}
+
 func TestToolCallRoundTripThroughADKRunner(t *testing.T) {
 	const toolUseID = "toolu_test_lookup"
 	var requestCount atomic.Int32

@@ -39,6 +39,24 @@ func buildRequest(name string, req *adkmodel.LLMRequest) (anthropicapi.MessageNe
 	}
 	if req.Config != nil {
 		cfg := req.Config
+		capabilities, known := capabilitiesForModel(name)
+		if !known && (cfg.ThinkingConfig != nil || cfg.Temperature != nil || cfg.TopP != nil || cfg.TopK != nil) {
+			return params, fmt.Errorf("Claude model %q has no declared thinking and sampling capabilities", name)
+		}
+		if capabilities.rejectSampling {
+			for _, field := range []struct {
+				name string
+				set  bool
+			}{
+				{"Temperature", cfg.Temperature != nil},
+				{"TopP", cfg.TopP != nil},
+				{"TopK", cfg.TopK != nil},
+			} {
+				if field.set {
+					return params, fmt.Errorf("Claude model %q does not support explicit %s; omit the field", name, field.name)
+				}
+			}
+		}
 		if cfg.MaxOutputTokens > 0 {
 			params.MaxTokens = int64(cfg.MaxOutputTokens)
 		}
@@ -64,18 +82,24 @@ func buildRequest(name string, req *adkmodel.LLMRequest) (anthropicapi.MessageNe
 			}
 		}
 		if cfg.ThinkingConfig != nil {
-			budget, enabled, err := thinkingBudget(cfg.ThinkingConfig)
-			if err != nil {
-				return params, err
-			}
-			if enabled {
-				if cfg.MaxOutputTokens == 0 && params.MaxTokens <= budget {
-					params.MaxTokens = budget + 2048
+			if capabilities.adaptiveThinking {
+				if err := configureAdaptiveThinking(&params, name, capabilities, cfg.ThinkingConfig); err != nil {
+					return params, err
 				}
-				if budget >= params.MaxTokens {
-					return params, fmt.Errorf("Claude thinking budget %d must be less than max output tokens %d", budget, params.MaxTokens)
+			} else {
+				budget, enabled, err := thinkingBudget(cfg.ThinkingConfig)
+				if err != nil {
+					return params, err
 				}
-				params.Thinking = anthropicapi.ThinkingConfigParamOfEnabled(budget)
+				if enabled {
+					if cfg.MaxOutputTokens == 0 && params.MaxTokens <= budget {
+						params.MaxTokens = budget + 2048
+					}
+					if budget >= params.MaxTokens {
+						return params, fmt.Errorf("Claude thinking budget %d must be less than max output tokens %d", budget, params.MaxTokens)
+					}
+					params.Thinking = anthropicapi.ThinkingConfigParamOfEnabled(budget)
+				}
 			}
 		}
 		if expectsJSONResponse(cfg) {
@@ -122,6 +146,53 @@ func buildRequest(name string, req *adkmodel.LLMRequest) (anthropicapi.MessageNe
 		}
 	}
 	return params, nil
+}
+
+func configureAdaptiveThinking(params *anthropicapi.MessageNewParams, name string, capabilities claudeModelCapabilities, cfg *genai.ThinkingConfig) error {
+	if cfg.ThinkingBudget != nil {
+		switch budget := *cfg.ThinkingBudget; budget {
+		case 0:
+			if capabilities.thinkingOnByDefault {
+				if !capabilities.canDisableThinking {
+					return fmt.Errorf("Claude model %q does not support disabling thinking", name)
+				}
+				params.Thinking = anthropicapi.ThinkingConfigParamUnion{
+					OfDisabled: &anthropicapi.ThinkingConfigDisabledParam{},
+				}
+			}
+			// Omitting thinking turns it off on Claude Opus 4.7 and 4.8.
+			return nil
+		case -1:
+			// GenAI's dynamic budget maps to Anthropic's adaptive mode.
+		default:
+			return fmt.Errorf("Claude model %q does not support fixed ThinkingBudget %d; use ThinkingLevel instead", name, budget)
+		}
+	}
+
+	var effort anthropicapi.OutputConfigEffort
+	switch cfg.ThinkingLevel {
+	case genai.ThinkingLevelHigh:
+		effort = anthropicapi.OutputConfigEffortHigh
+	case genai.ThinkingLevelMedium:
+		effort = anthropicapi.OutputConfigEffortMedium
+	case genai.ThinkingLevelLow, genai.ThinkingLevelMinimal:
+		// Anthropic has no separate "minimal" effort; low is the closest level.
+		effort = anthropicapi.OutputConfigEffortLow
+	case "", genai.ThinkingLevelUnspecified:
+		if !cfg.IncludeThoughts && cfg.ThinkingBudget == nil {
+			return nil
+		}
+	default:
+		return fmt.Errorf("unsupported Claude thinking level %q", cfg.ThinkingLevel)
+	}
+
+	adaptive := &anthropicapi.ThinkingConfigAdaptiveParam{}
+	if cfg.IncludeThoughts {
+		adaptive.Display = anthropicapi.ThinkingConfigAdaptiveDisplaySummarized
+	}
+	params.Thinking = anthropicapi.ThinkingConfigParamUnion{OfAdaptive: adaptive}
+	params.OutputConfig.Effort = effort
+	return nil
 }
 
 func expectsJSONResponse(cfg *genai.GenerateContentConfig) bool {
