@@ -34,12 +34,14 @@ func (m *geminiModel) Connect(ctx context.Context, req *model.LLMRequest) (model
 	return &liveConnection{
 		session:   session,
 		modelName: m.name,
+		backend:   m.GetGoogleLLMVariant(),
 	}, nil
 }
 
 type liveConnection struct {
 	session   *genai.Session
 	modelName string
+	backend   genai.Backend
 
 	inputTranscriptionText  string
 	outputTranscriptionText string
@@ -49,6 +51,18 @@ type liveConnection struct {
 // Mirrors Python's model_name_utils.is_gemini_3_1_flash_live.
 func isGemini31FlashLive(modelName string) bool {
 	return strings.HasPrefix(modelName, "gemini-3.1-flash-live")
+}
+
+// isGemini38Live returns true if the model is a Gemini 3.8 Live model.
+func isGemini38Live(modelName string) bool {
+	if i := strings.LastIndex(modelName, "/"); i >= 0 {
+		modelName = modelName[i+1:]
+	}
+	return strings.HasPrefix(modelName, "gemini-3.8-live")
+}
+
+func shouldConvertFileDataPartsToText(modelName string, backend genai.Backend) bool {
+	return backend == genai.BackendVertexAI && isGemini38Live(modelName)
 }
 
 func (c *liveConnection) SendHistory(contents []*genai.Content) error {
@@ -76,6 +90,14 @@ func (c *liveConnection) SendHistory(contents []*genai.Content) error {
 	// SendClientContent causes the server to reject the request with
 	// "invalid argument" (websocket close 1007).
 	filteredContents = stripThoughtSignatures(filteredContents)
+
+	// Vertex AI currently rejects FileData parts in history for Gemini 3.8
+	// Live with an internal error. Convert only those parts to text while
+	// preserving their metadata as a temporary compatibility workaround.
+	// Gemini API accepts FileData history, so leave it unchanged there.
+	if shouldConvertFileDataPartsToText(c.modelName, c.backend) {
+		filteredContents = convertFileDataPartsToText(filteredContents)
+	}
 
 	// Convert FunctionCall/FunctionResponse parts to text summaries.
 	// The Live API handles tool interactions via separate ToolCall /
@@ -626,6 +648,40 @@ func convertFunctionPartsToText(contents []*genai.Content) []*genai.Content {
 		if len(converted.Parts) > 0 {
 			out = append(out, converted)
 		}
+	}
+	return out
+}
+
+// convertFileDataPartsToText rewrites FileData parts as plain text while
+// retaining the file metadata. Original contents and parts are left untouched.
+func convertFileDataPartsToText(contents []*genai.Content) []*genai.Content {
+	out := make([]*genai.Content, 0, len(contents))
+	for _, c := range contents {
+		hasFileData := false
+		for _, p := range c.Parts {
+			if p != nil && p.FileData != nil {
+				hasFileData = true
+				break
+			}
+		}
+		if !hasFileData {
+			out = append(out, c)
+			continue
+		}
+
+		converted := &genai.Content{Role: c.Role}
+		for _, p := range c.Parts {
+			if p == nil || p.FileData == nil {
+				converted.Parts = append(converted.Parts, p)
+				continue
+			}
+
+			fileData, _ := json.Marshal(p.FileData)
+			converted.Parts = append(converted.Parts, &genai.Part{
+				Text: fmt.Sprintf("file data: %s", string(fileData)),
+			})
+		}
+		out = append(out, converted)
 	}
 	return out
 }
