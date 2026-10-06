@@ -58,6 +58,11 @@ func ValidateGenerateContentConfig(modelName string, cfg *genai.GenerateContentC
 			}
 		}
 	}
+	if capabilities.rejectForcedToolUse && cfg.ToolConfig != nil &&
+		cfg.ToolConfig.FunctionCallingConfig != nil &&
+		cfg.ToolConfig.FunctionCallingConfig.Mode == genai.FunctionCallingConfigModeAny {
+		return fmt.Errorf("Claude model %q does not support forced tool choice (mode ANY); use AUTO", modelName)
+	}
 	if cfg.SystemInstruction != nil {
 		for _, part := range cfg.SystemInstruction.Parts {
 			if part != nil && part.Text == "" {
