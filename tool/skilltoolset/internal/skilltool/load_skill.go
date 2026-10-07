@@ -42,10 +42,27 @@ func recordActivation(ctx tool.Context, skillName string) {
 	}
 	stateKey := fmt.Sprintf("_adk_activated_skill_%s", agentName)
 	existing, _ := ctx.State().Get(stateKey)
-	activated, _ := existing.([]string)
+	activated := activatedSkillNames(existing)
 	if !slices.Contains(activated, skillName) {
 		activated = append(activated, skillName)
 		ctx.State().Set(stateKey, activated) //nolint:errcheck
+	}
+}
+
+func activatedSkillNames(value any) []string {
+	switch activatedSkills := value.(type) {
+	case []string:
+		return activatedSkills
+	case []any:
+		result := make([]string, 0, len(activatedSkills))
+		for _, activatedSkill := range activatedSkills {
+			if name, ok := activatedSkill.(string); ok && name != "" {
+				result = append(result, name)
+			}
+		}
+		return result
+	default:
+		return nil
 	}
 }
 

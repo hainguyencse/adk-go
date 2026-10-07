@@ -54,16 +54,21 @@ type Config struct {
 
 	AdditionalTools    []tool.Tool
 	AdditionalToolsets []tool.Toolset
+	// PreloadAdditionalTools exposes all additional tools without requiring a
+	// skill to be activated first. This is useful for live connections, whose
+	// tool declarations are fixed when the connection is established.
+	PreloadAdditionalTools bool
 }
 
 // SkillToolset provides a toolset for skills.
 type SkillToolset struct {
-	name               string
-	tools              []tool.Tool
-	source             skill.Source
-	systemInstruction  string
-	additionalTools    []tool.Tool
-	additionalToolsets []tool.Toolset
+	name                   string
+	tools                  []tool.Tool
+	source                 skill.Source
+	systemInstruction      string
+	additionalTools        []tool.Tool
+	additionalToolsets     []tool.Toolset
+	preloadAdditionalTools bool
 }
 
 // New creates a new Skill Toolset based on the provided configuration.
@@ -92,12 +97,13 @@ func New(ctx context.Context, cfg Config) (*SkillToolset, error) {
 		return nil, fmt.Errorf("create load skill resource tool: %w", err)
 	}
 	return &SkillToolset{
-		name:               name,
-		tools:              []tool.Tool{listTool, loadTool, loadResourceTool},
-		source:             cfg.Source,
-		systemInstruction:  instruction,
-		additionalTools:    cfg.AdditionalTools,
-		additionalToolsets: cfg.AdditionalToolsets,
+		name:                   name,
+		tools:                  []tool.Tool{listTool, loadTool, loadResourceTool},
+		source:                 cfg.Source,
+		systemInstruction:      instruction,
+		additionalTools:        cfg.AdditionalTools,
+		additionalToolsets:     cfg.AdditionalToolsets,
+		preloadAdditionalTools: cfg.PreloadAdditionalTools,
 	}, nil
 }
 
@@ -123,12 +129,16 @@ func (ts *SkillToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 		return result, nil
 	}
 
-	additionalToolNames, err := ts.resolveAdditionalToolNamesFromState(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if len(additionalToolNames) == 0 {
-		return result, nil
+	additionalToolNames := make(map[string]bool)
+	if !ts.preloadAdditionalTools {
+		var err error
+		additionalToolNames, err = ts.resolveAdditionalToolNamesFromState(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if len(additionalToolNames) == 0 {
+			return result, nil
+		}
 	}
 
 	// Build a map of candidate tools from additionalTools.
@@ -145,6 +155,11 @@ func (ts *SkillToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 		}
 		for _, t := range tools {
 			candidates[t.Name()] = t
+		}
+	}
+	if ts.preloadAdditionalTools {
+		for name := range candidates {
+			additionalToolNames[name] = true
 		}
 	}
 
@@ -207,12 +222,20 @@ func (ts *SkillToolset) getActivatedSkills(ctx agent.ReadonlyContext) ([]string,
 		return nil, nil
 	}
 
-	activatedSkills, ok := val.([]string)
-	if !ok || len(activatedSkills) == 0 {
+	switch activatedSkills := val.(type) {
+	case []string:
+		return activatedSkills, nil
+	case []any:
+		result := make([]string, 0, len(activatedSkills))
+		for _, activatedSkill := range activatedSkills {
+			if name, ok := activatedSkill.(string); ok && name != "" {
+				result = append(result, name)
+			}
+		}
+		return result, nil
+	default:
 		return nil, nil
 	}
-
-	return activatedSkills, nil
 }
 
 // ProcessRequest implements toolinternal.RequestProcessor. It attaches
