@@ -207,12 +207,20 @@ func (ts *SkillToolset) getActivatedSkills(ctx agent.ReadonlyContext) ([]string,
 		return nil, nil
 	}
 
-	activatedSkills, ok := val.([]string)
-	if !ok || len(activatedSkills) == 0 {
+	switch activatedSkills := val.(type) {
+	case []string:
+		return activatedSkills, nil
+	case []any:
+		result := make([]string, 0, len(activatedSkills))
+		for _, activatedSkill := range activatedSkills {
+			if name, ok := activatedSkill.(string); ok && name != "" {
+				result = append(result, name)
+			}
+		}
+		return result, nil
+	default:
 		return nil, nil
 	}
-
-	return activatedSkills, nil
 }
 
 // ProcessRequest implements toolinternal.RequestProcessor. It attaches
