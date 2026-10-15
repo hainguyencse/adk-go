@@ -412,6 +412,67 @@ func TestNewVertexModelsAllowAutoToolChoice(t *testing.T) {
 	}
 }
 
+func TestAdditionalClaudeModelsUseSupportedThinkingModes(t *testing.T) {
+	for _, name := range []string{"claude-haiku-5-5", "claude-mythos-5-1", "claude-mythos-preview"} {
+		t.Run(name, func(t *testing.T) {
+			params, err := buildRequest(name, &adkmodel.LLMRequest{Config: &genai.GenerateContentConfig{
+				ThinkingConfig: &genai.ThinkingConfig{
+					ThinkingLevel:   genai.ThinkingLevelMedium,
+					IncludeThoughts: true,
+				},
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if params.Thinking.OfAdaptive == nil || params.Thinking.OfEnabled != nil ||
+				params.Thinking.OfAdaptive.Display != anthropicapi.ThinkingConfigAdaptiveDisplaySummarized {
+				t.Fatalf("wrong adaptive thinking request: %+v", params.Thinking)
+			}
+		})
+	}
+}
+
+func TestDualModeClaudeModelsAcceptFixedBudget(t *testing.T) {
+	for _, name := range []string{"claude-opus-4-6", "claude-sonnet-4-6", "claude-mythos-preview"} {
+		t.Run(name, func(t *testing.T) {
+			params, err := buildRequest(name, &adkmodel.LLMRequest{Config: &genai.GenerateContentConfig{
+				ThinkingConfig: &genai.ThinkingConfig{
+					ThinkingBudget: genai.Ptr(int32(2048)), IncludeThoughts: true,
+				},
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if params.Thinking.OfEnabled == nil || params.Thinking.OfEnabled.BudgetTokens != 2048 ||
+				params.Thinking.OfEnabled.Display != anthropicapi.ThinkingConfigEnabledDisplaySummarized ||
+				params.Thinking.OfAdaptive != nil {
+				t.Fatalf("wrong manual thinking request: %+v", params.Thinking)
+			}
+		})
+	}
+}
+
+func TestNewClaudeModelsRejectUnsupportedOptions(t *testing.T) {
+	for _, name := range []string{"claude-haiku-5-5", "claude-mythos-5-1", "claude-mythos-preview"} {
+		t.Run(name, func(t *testing.T) {
+			if err := ValidateGenerateContentConfig(name, &genai.GenerateContentConfig{
+				Temperature: genai.Ptr(float32(0.5)),
+			}); err == nil || !strings.Contains(err.Error(), "Temperature") {
+				t.Fatalf("sampling error = %v", err)
+			}
+		})
+	}
+	for _, name := range []string{"claude-mythos-5-1", "claude-mythos-preview"} {
+		t.Run(name+" cannot disable thinking", func(t *testing.T) {
+			if err := ValidateGenerateContentConfig(name, &genai.GenerateContentConfig{
+				ThinkingConfig: &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(0))},
+			}); err == nil || !strings.Contains(err.Error(), "does not support disabling thinking") {
+				t.Fatalf("disabled thinking error = %v", err)
+			}
+		})
+	}
+}
+
 func TestOpus47ThinkingBudget(t *testing.T) {
 	for _, tt := range []struct {
 		name         string
