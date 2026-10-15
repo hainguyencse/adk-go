@@ -73,7 +73,7 @@ func ValidateGenerateContentConfig(modelName string, cfg *genai.GenerateContentC
 	if cfg.ThinkingConfig == nil {
 		return nil
 	}
-	if capabilities.adaptiveThinking {
+	if capabilities.adaptiveThinking && !usesManualThinking(capabilities, cfg.ThinkingConfig) {
 		return validateAdaptiveThinkingConfig(modelName, capabilities, cfg.ThinkingConfig)
 	}
 	budget, enabled, err := manualThinkingBudget(cfg.ThinkingConfig)
@@ -114,6 +114,12 @@ func validateAdaptiveThinkingConfig(name string, capabilities claudeModelCapabil
 	default:
 		return fmt.Errorf("unsupported Claude thinking level %q", cfg.ThinkingLevel)
 	}
+}
+
+// A fixed budget selects the legacy extended-thinking mode only on models
+// that explicitly support both it and adaptive thinking.
+func usesManualThinking(capabilities claudeModelCapabilities, cfg *genai.ThinkingConfig) bool {
+	return capabilities.manualThinking && cfg != nil && cfg.ThinkingBudget != nil && *cfg.ThinkingBudget > 0
 }
 
 func buildRequest(name string, req *adkmodel.LLMRequest) (anthropicapi.MessageNewParams, error) {
@@ -186,7 +192,7 @@ func convertGenerateContentConfig(params *anthropicapi.MessageNewParams, name st
 		}
 	}
 	if cfg.ThinkingConfig != nil {
-		if capabilities.adaptiveThinking {
+		if capabilities.adaptiveThinking && !usesManualThinking(capabilities, cfg.ThinkingConfig) {
 			// Anthropic does not accept GenAI ThinkingLevel directly. Adaptive
 			// models use output_config.effort instead of budget_tokens.
 			configureAdaptiveThinking(params, capabilities, cfg.ThinkingConfig)
@@ -202,6 +208,9 @@ func convertGenerateContentConfig(params *anthropicapi.MessageNewParams, name st
 					params.MaxTokens = budget + 2048
 				}
 				params.Thinking = anthropicapi.ThinkingConfigParamOfEnabled(budget)
+				if cfg.ThinkingConfig.IncludeThoughts {
+					params.Thinking.OfEnabled.Display = anthropicapi.ThinkingConfigEnabledDisplaySummarized
+				}
 			}
 		}
 	}
