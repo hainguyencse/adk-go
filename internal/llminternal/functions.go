@@ -43,14 +43,14 @@ func generateRequestConfirmationEvent(
 
 	parts := []*genai.Part{}
 	longRunningToolIDs := []string{}
-	functionCalls := make(map[string]*genai.FunctionCall, len(functionCallEvent.Content.Parts))
-	for _, call := range utils.FunctionCalls(functionCallEvent.Content) {
-		functionCalls[call.ID] = call
-	}
-
-	for funcID, confirmation := range functionResponseEvent.Actions.RequestedToolConfirmations {
-		originalFunctionCall, ok := functionCalls[funcID]
-		if !ok || originalFunctionCall == nil {
+	// Follow model-response order so parallel confirmation requests are deterministic.
+	for _, originalPart := range functionCallEvent.Content.Parts {
+		if originalPart.FunctionCall == nil {
+			continue
+		}
+		originalFunctionCall := originalPart.FunctionCall
+		confirmation, ok := functionResponseEvent.Actions.RequestedToolConfirmations[originalFunctionCall.ID]
+		if !ok {
 			continue
 		}
 
@@ -67,7 +67,8 @@ func generateRequestConfirmationEvent(
 		}
 
 		parts = append(parts, &genai.Part{
-			FunctionCall: requestConfirmationFC,
+			FunctionCall:     requestConfirmationFC,
+			ThoughtSignature: originalPart.ThoughtSignature,
 		})
 		longRunningToolIDs = append(longRunningToolIDs, requestConfirmationFC.ID)
 	}

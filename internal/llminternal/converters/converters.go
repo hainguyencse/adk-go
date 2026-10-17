@@ -24,7 +24,7 @@ func Genai2LLMResponse(res *genai.GenerateContentResponse) *model.LLMResponse {
 	usageMetadata := res.UsageMetadata
 	if len(res.Candidates) > 0 && res.Candidates[0] != nil {
 		candidate := res.Candidates[0]
-		if candidate.Content != nil && len(candidate.Content.Parts) > 0 {
+		if (candidate.Content != nil && len(candidate.Content.Parts) > 0) || candidate.FinishReason == genai.FinishReasonStop {
 			return &model.LLMResponse{
 				Content:           candidate.Content,
 				GroundingMetadata: candidate.GroundingMetadata,
@@ -56,9 +56,17 @@ func Genai2LLMResponse(res *genai.GenerateContentResponse) *model.LLMResponse {
 			ModelVersion:  res.ModelVersion,
 		}
 	}
+	// no candidates, no prompt feedback.
+	// Sometimes gemini-3* invoked via aiplatform (VertexAI) sends empty entries at the beginning.
+	// sample stream of SSE chunks (first 3):
+	// data: {"candidates": [{"content": {"role": "model","parts": [{"text": ""}]}}],"usageMetadata": {"trafficType": "ON_DEMAND"},"modelVersion": "gemini-3.1-flash-lite","createTime": "2026-05-28T09:40:03.380865Z","responseId": "REDACTED"}
+	//
+	// data: {"usageMetadata": {"trafficType": "ON_DEMAND"},"modelVersion": "gemini-3.1-flash-lite","createTime": "2026-05-28T09:40:03.380865Z","responseId": "REDACTED"}
+	//
+	// data: {"usageMetadata": {"trafficType": "ON_DEMAND"},"modelVersion": "gemini-3.1-flash-lite","createTime": "2026-05-28T09:40:03.380865Z","responseId": "REDACTED"}
+	// we should treat them as valid, empty responses and let the downstream to process usageMetadata
 	return &model.LLMResponse{
-		ErrorCode:     "UNKNOWN_ERROR",
-		ErrorMessage:  "Unknown error.",
+		Content:       &genai.Content{Parts: []*genai.Part{}, Role: "model"},
 		UsageMetadata: usageMetadata,
 		ModelVersion:  res.ModelVersion,
 	}
