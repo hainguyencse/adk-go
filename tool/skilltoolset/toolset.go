@@ -216,26 +216,11 @@ func (ts *SkillToolset) resolveAdditionalToolNamesFromState(ctx agent.ReadonlyCo
 }
 
 func (ts *SkillToolset) getActivatedSkills(ctx agent.ReadonlyContext) ([]string, error) {
-	stateKey := fmt.Sprintf("_adk_activated_skill_%s", ctx.AgentName())
-	val, err := ctx.ReadonlyState().Get(stateKey)
+	val, err := ctx.ReadonlyState().Get(skilltool.ActivatedSkillsStateKey(ctx.AgentName()))
 	if err != nil {
 		return nil, nil
 	}
-
-	switch activatedSkills := val.(type) {
-	case []string:
-		return activatedSkills, nil
-	case []any:
-		result := make([]string, 0, len(activatedSkills))
-		for _, activatedSkill := range activatedSkills {
-			if name, ok := activatedSkill.(string); ok && name != "" {
-				result = append(result, name)
-			}
-		}
-		return result, nil
-	default:
-		return nil, nil
-	}
+	return skilltool.ActivatedSkillNames(val), nil
 }
 
 // ProcessRequest implements toolinternal.RequestProcessor. It attaches

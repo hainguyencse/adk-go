@@ -24,9 +24,21 @@ import (
 	"google.golang.org/adk/tool/skilltoolset/skill"
 )
 
-// recordActivation writes skillName into the per-agent activated-skills list in
+// ActivatedSkillsStateKey returns the state key that holds the skills
+// activated by the given agent.
+func ActivatedSkillsStateKey(agentName string) string {
+	return fmt.Sprintf("_adk_activated_skill_%s", agentName)
+}
+
+// recordActivation writes skillName into the per-agent activated-skills set in
 // state so that SkillToolset.Tools() can later resolve adk_additional_tools.
 // It silently no-ops when ctx is incomplete (e.g. in unit tests).
+//
+// The set is stored as map[string]any{skillName: true} rather than a list.
+// Parallel tool calls each get their own state delta, and those deltas are
+// deep-merged afterwards: maps are merged key by key, while a list from one
+// call would overwrite the list from another, losing activations when several
+// load_skill calls run in the same model response.
 func recordActivation(ctx tool.Context, skillName string) {
 	if ctx == nil {
 		return
@@ -40,30 +52,45 @@ func recordActivation(ctx tool.Context, skillName string) {
 	if agentName == "" {
 		return
 	}
-	stateKey := fmt.Sprintf("_adk_activated_skill_%s", agentName)
+	stateKey := ActivatedSkillsStateKey(agentName)
 	existing, _ := ctx.State().Get(stateKey)
-	activated := activatedSkillNames(existing)
-	if !slices.Contains(activated, skillName) {
-		activated = append(activated, skillName)
-		ctx.State().Set(stateKey, activated) //nolint:errcheck
+	activated := make(map[string]any)
+	for _, name := range ActivatedSkillNames(existing) {
+		activated[name] = true
 	}
+	// Always write the map form, even when skillName is already present, so
+	// state saved in the legacy list form is migrated on the next load.
+	activated[skillName] = true
+	ctx.State().Set(stateKey, activated) //nolint:errcheck
 }
 
-func activatedSkillNames(value any) []string {
+// ActivatedSkillNames returns the skill names stored under
+// ActivatedSkillsStateKey, sorted. It accepts the current map form and the
+// legacy list form ([]string or []any).
+func ActivatedSkillNames(value any) []string {
+	var result []string
 	switch activatedSkills := value.(type) {
+	case map[string]any:
+		for name, active := range activatedSkills {
+			if ok, _ := active.(bool); ok && name != "" {
+				result = append(result, name)
+			}
+		}
 	case []string:
-		return activatedSkills
+		for _, name := range activatedSkills {
+			if name != "" {
+				result = append(result, name)
+			}
+		}
 	case []any:
-		result := make([]string, 0, len(activatedSkills))
 		for _, activatedSkill := range activatedSkills {
 			if name, ok := activatedSkill.(string); ok && name != "" {
 				result = append(result, name)
 			}
 		}
-		return result
-	default:
-		return nil
 	}
+	slices.Sort(result)
+	return slices.Compact(result)
 }
 
 // LoadSkillArgs represents the input to load a skill.
