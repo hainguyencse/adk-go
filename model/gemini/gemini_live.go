@@ -560,9 +560,9 @@ func isAudioPart(p *genai.Part) bool {
 	return false
 }
 
-// stripThoughtSignatures returns copies of contents with ThoughtSignature
-// and the Thought marker cleared from every part. Original contents/parts
-// are left untouched.
+// thought signature return from sse mode.
+// live mode will return error when we send thought signature.
+// for support case same session but switch from sse to live mode, we need strip thought signature from history before send to live mode.
 func stripThoughtSignatures(contents []*genai.Content) []*genai.Content {
 	out := make([]*genai.Content, len(contents))
 	for i, c := range contents {
