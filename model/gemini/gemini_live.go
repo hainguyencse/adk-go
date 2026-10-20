@@ -115,6 +115,8 @@ func (c *liveConnection) SendHistory(contents []*genai.Content) error {
 	// user-role content. Merging keeps strict alternation.
 	filteredContents = mergeConsecutiveSameRoleContents(filteredContents)
 
+	filteredContents = filterEmptyParts(filteredContents)
+
 	if len(filteredContents) > 0 {
 		lastRole := filteredContents[len(filteredContents)-1].Role
 		turnComplete := lastRole == "user"
@@ -583,6 +585,34 @@ func stripThoughtSignatures(contents []*genai.Content) []*genai.Content {
 	return out
 }
 
+// filterEmptyParts removes nil parts and parts without data after signature
+// stripping. Empty contents are omitted; the original history is untouched.
+func filterEmptyParts(contents []*genai.Content) []*genai.Content {
+	out := make([]*genai.Content, 0, len(contents))
+	for _, c := range contents {
+		if c == nil {
+			continue
+		}
+		parts := make([]*genai.Part, 0, len(c.Parts))
+		for _, p := range c.Parts {
+			if p == nil {
+				continue
+			}
+			if p.Text == "" && p.InlineData == nil && p.FileData == nil &&
+				p.FunctionCall == nil && p.FunctionResponse == nil &&
+				p.ExecutableCode == nil && p.CodeExecutionResult == nil &&
+				p.ToolCall == nil && p.ToolResponse == nil {
+				continue
+			}
+			parts = append(parts, p)
+		}
+		if len(parts) > 0 {
+			out = append(out, &genai.Content{Role: c.Role, Parts: parts})
+		}
+	}
+	return out
+}
+
 // filterAudioParts returns a copy of the content with audio parts removed.
 // Returns nil if no non-audio parts remain.
 // This matches Python's filter_audio_parts in content_utils.py.
@@ -592,7 +622,7 @@ func filterAudioParts(c *genai.Content) *genai.Content {
 	}
 	var filtered []*genai.Part
 	for _, p := range c.Parts {
-		if !isAudioPart(p) {
+		if p != nil && !isAudioPart(p) {
 			filtered = append(filtered, p)
 		}
 	}
