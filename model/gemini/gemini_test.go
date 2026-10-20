@@ -37,6 +37,33 @@ import (
 
 //go:generate go test -httprecord=testdata/.*\.httprr
 
+func TestFilterEmptyPartsAfterStrippingThoughtSignatures(t *testing.T) {
+	signature := []byte("signature")
+	text := &genai.Part{Text: "Hello", Thought: true, ThoughtSignature: signature}
+	signatureOnly := &genai.Part{ThoughtSignature: signature}
+	tool := genai.NewPartFromFunctionCall("search", map[string]any{"query": "unit"})
+	contents := []*genai.Content{
+		nil,
+		{Role: "model", Parts: []*genai.Part{nil, {}, signatureOnly, text, tool}},
+		{Role: "model", Parts: []*genai.Part{signatureOnly, {Thought: true}}},
+		{Role: "user"},
+	}
+	want := []*genai.Content{{
+		Role: "model",
+		Parts: []*genai.Part{
+			{Text: "Hello"},
+			tool,
+		},
+	}}
+	if diff := cmp.Diff(want, filterEmptyParts(stripThoughtSignatures(contents))); diff != "" {
+		t.Errorf("filtered history mismatch (-want +got):\n%s", diff)
+	}
+	if !text.Thought || !cmp.Equal(text.ThoughtSignature, signature) ||
+		!cmp.Equal(signatureOnly.ThoughtSignature, signature) || len(contents[1].Parts) != 5 {
+		t.Error("original history was modified")
+	}
+}
+
 func TestModel_Generate(t *testing.T) {
 	tests := []struct {
 		name      string
