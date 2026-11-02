@@ -61,6 +61,27 @@ func IsGemini25OrLower(model string) bool {
 	return version <= 2.5
 }
 
+// IsGemini3xLive returns true if the model is a Gemini 3.x Live model.
+// Mirrors Python's model_name_utils._is_gemini_3_x_live.
+func IsGemini3xLive(model string) bool {
+	if model == "" {
+		return false
+	}
+	modelName := extractModelName(model)
+	return strings.HasPrefix(modelName, "gemini-3.") &&
+		strings.Contains(modelName, "-live") &&
+		!IsGemini35LiveTranslate(model)
+}
+
+// IsGemini35LiveTranslate returns true if the model is a Gemini 3.5 Live Translate model.
+// Mirrors Python's model_name_utils.is_gemini_3_5_live_translate.
+func IsGemini35LiveTranslate(model string) bool {
+	if model == "" {
+		return false
+	}
+	return strings.HasPrefix(extractModelName(model), "gemini-3.5-live-translate")
+}
+
 // IsGeminiAPIVariant returns true if the model is a Gemini API model (not Vertex AI).
 func IsGeminiAPIVariant(llm model.LLM) bool {
 	return GetGoogleLLMVariant(llm) == genai.BackendGeminiAPI

@@ -21,8 +21,13 @@ import (
 
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/internal/llminternal/googlellm"
 	"google.golang.org/adk/model"
 )
+
+// responseTriggerText is a minimal placeholder text sent to Gemini 3.x Live to
+// trigger a response to history that was just replayed. See SendHistory.
+const responseTriggerText = "."
 
 // Connect establishes a bidirectional streaming connection to the model.
 func (m *geminiModel) Connect(ctx context.Context, req *model.LLMRequest) (model.LiveConnection, error) {
@@ -45,12 +50,6 @@ type liveConnection struct {
 
 	inputTranscriptionText  string
 	outputTranscriptionText string
-}
-
-// isGemini31FlashLive returns true if the model is a Gemini 3.1 Flash Live model.
-// Mirrors Python's model_name_utils.is_gemini_3_1_flash_live.
-func isGemini31FlashLive(modelName string) bool {
-	return strings.HasPrefix(modelName, "gemini-3.1-flash-live")
 }
 
 // isGemini38Live returns true if the model is a Gemini 3.8 Live model.
@@ -120,11 +119,19 @@ func (c *liveConnection) SendHistory(contents []*genai.Content) error {
 	if len(filteredContents) > 0 {
 		lastRole := filteredContents[len(filteredContents)-1].Role
 		turnComplete := lastRole == "user"
-		if err := c.session.SendClientContent(genai.LiveClientContentInput{
+		err := c.session.SendClientContent(genai.LiveClientContentInput{
 			Turns:        filteredContents,
 			TurnComplete: genai.Ptr(turnComplete),
-		}); err != nil {
+		})
+		if err != nil {
 			return err
+		}
+
+		isGemini3xLive := googlellm.IsGemini3xLive(c.modelName)
+		if turnComplete && isGemini3xLive {
+			return c.session.SendRealtimeInput(genai.LiveSendRealtimeInputParameters{
+				Text: responseTriggerText,
+			})
 		}
 	}
 
@@ -144,7 +151,7 @@ func (c *liveConnection) SendContent(content *genai.Content) error {
 				FunctionResponses: functionResponses,
 			})
 		} else {
-			if isGemini31FlashLive(c.modelName) && len(content.Parts) == 1 && content.Parts[0].Text != "" {
+			if googlellm.IsGemini3xLive(c.modelName) && len(content.Parts) == 1 && content.Parts[0].Text != "" {
 				return c.session.SendRealtimeInput(genai.LiveSendRealtimeInputParameters{
 					Text: content.Parts[0].Text,
 				})
@@ -166,7 +173,7 @@ func (c *liveConnection) SendRealtime(input *genai.LiveRealtimeInput) error {
 	}
 
 	if input.Media != nil {
-		if isGemini31FlashLive(c.modelName) {
+		if googlellm.IsGemini3xLive(c.modelName) || googlellm.IsGemini35LiveTranslate(c.modelName) {
 			if strings.HasPrefix(input.Media.MIMEType, "audio/") {
 				return c.session.SendRealtimeInput(genai.LiveSendRealtimeInputParameters{
 					Audio: input.Media,
@@ -451,12 +458,12 @@ func (c *liveConnection) process(ctx context.Context, in <-chan *genai.LiveServe
 					for _, fc := range msg.ToolCall.FunctionCalls {
 						toolCallParts = append(toolCallParts, &genai.Part{FunctionCall: fc})
 					}
-					// Gemini 3.1 does not emit turn_complete until it receives the
+					// Gemini 3.x Live does not emit turn_complete until it receives the
 					// tool response, so yield tool calls immediately to avoid
 					// deadlocking the conversation. Other models (e.g. 2.5-pro,
 					// native-audio) send turn_complete after tool calls, so buffer
 					// and merge them into a single response at turn_complete.
-					if isGemini31FlashLive(c.modelName) && len(toolCallParts) > 0 {
+					if googlellm.IsGemini3xLive(c.modelName) && len(toolCallParts) > 0 {
 						if !send(&model.LLMResponse{
 							Content: &genai.Content{Role: "model", Parts: toolCallParts},
 						}) {
