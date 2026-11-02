@@ -79,6 +79,15 @@ type LLMResponse struct {
 	// Audio transcription of model output (from Gemini Live API).
 	OutputTranscription *genai.Transcription
 	LiveGoAway          *genai.LiveServerGoAway
+
+	// Reason why the model turn completed (from Gemini Live API).
+	TurnCompleteReason genai.TurnCompleteReason
+	// Sent alongside TurnComplete by models that answer one user prompt with
+	// several turns; tells whether the model is really done (IDLE) or still
+	// working on the prompt (IN_PROGRESS).
+	InteractionStatus genai.InteractionStatus
+	// Voice activity signal from the Gemini Live API.
+	VoiceActivity *genai.VoiceActivity
 }
 
 // LiveRequest is the request to be sent to the model in the live stream.

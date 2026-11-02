@@ -21,8 +21,13 @@ import (
 
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/internal/llminternal/googlellm"
 	"google.golang.org/adk/model"
 )
+
+// responseTriggerText is a minimal placeholder text sent to Gemini 3.x Live to
+// trigger a response to history that was just replayed. See SendHistory.
+const responseTriggerText = "."
 
 // Connect establishes a bidirectional streaming connection to the model.
 func (m *geminiModel) Connect(ctx context.Context, req *model.LLMRequest) (model.LiveConnection, error) {
@@ -45,12 +50,6 @@ type liveConnection struct {
 
 	inputTranscriptionText  string
 	outputTranscriptionText string
-}
-
-// isGemini31FlashLive returns true if the model is a Gemini 3.1 Flash Live model.
-// Mirrors Python's model_name_utils.is_gemini_3_1_flash_live.
-func isGemini31FlashLive(modelName string) bool {
-	return strings.HasPrefix(modelName, "gemini-3.1-flash-live")
 }
 
 // isGemini38Live returns true if the model is a Gemini 3.8 Live model.
@@ -82,6 +81,12 @@ func (c *liveConnection) SendHistory(contents []*genai.Content) error {
 			filteredContents = append(filteredContents, fc)
 		}
 	}
+
+	// Python decides turn_complete from the media-filtered history. Decide it
+	// here, before convertFunctionPartsToText below rewrites model
+	// FunctionCall turns to role "user".
+	turnComplete := len(filteredContents) > 0 &&
+		filteredContents[len(filteredContents)-1].Role == "user"
 
 	// Strip ThoughtSignature (and the Thought marker) from history parts.
 	// A thought signature is only valid when replayed within the live
@@ -118,13 +123,19 @@ func (c *liveConnection) SendHistory(contents []*genai.Content) error {
 	filteredContents = filterEmptyParts(filteredContents)
 
 	if len(filteredContents) > 0 {
-		lastRole := filteredContents[len(filteredContents)-1].Role
-		turnComplete := lastRole == "user"
-		if err := c.session.SendClientContent(genai.LiveClientContentInput{
+		err := c.session.SendClientContent(genai.LiveClientContentInput{
 			Turns:        filteredContents,
 			TurnComplete: genai.Ptr(turnComplete),
-		}); err != nil {
+		})
+		if err != nil {
 			return err
+		}
+
+		isGemini3xLive := googlellm.IsGemini3xLive(c.modelName)
+		if turnComplete && isGemini3xLive {
+			return c.session.SendRealtimeInput(genai.LiveSendRealtimeInputParameters{
+				Text: responseTriggerText,
+			})
 		}
 	}
 
@@ -133,7 +144,10 @@ func (c *liveConnection) SendHistory(contents []*genai.Content) error {
 
 func (c *liveConnection) SendContent(content *genai.Content) error {
 	if content != nil {
-		if content.Parts != nil && content.Parts[0].FunctionResponse != nil {
+		if len(content.Parts) == 0 {
+			return fmt.Errorf("content has no parts")
+		}
+		if allFunctionResponses(content.Parts) {
 			var functionResponses []*genai.FunctionResponse
 			for _, part := range content.Parts {
 				if part.FunctionResponse != nil {
@@ -144,7 +158,7 @@ func (c *liveConnection) SendContent(content *genai.Content) error {
 				FunctionResponses: functionResponses,
 			})
 		} else {
-			if isGemini31FlashLive(c.modelName) && len(content.Parts) == 1 && content.Parts[0].Text != "" {
+			if googlellm.IsGemini3xLive(c.modelName) && len(content.Parts) == 1 && content.Parts[0].Text != "" {
 				return c.session.SendRealtimeInput(genai.LiveSendRealtimeInputParameters{
 					Text: content.Parts[0].Text,
 				})
@@ -160,13 +174,23 @@ func (c *liveConnection) SendContent(content *genai.Content) error {
 	return nil
 }
 
+// allFunctionResponses reports whether every part is a function response.
+func allFunctionResponses(parts []*genai.Part) bool {
+	for _, p := range parts {
+		if p == nil || p.FunctionResponse == nil {
+			return false
+		}
+	}
+	return true
+}
+
 func (c *liveConnection) SendRealtime(input *genai.LiveRealtimeInput) error {
 	if input == nil {
 		return nil
 	}
 
 	if input.Media != nil {
-		if isGemini31FlashLive(c.modelName) {
+		if googlellm.IsGemini3xLive(c.modelName) || googlellm.IsGemini35LiveTranslate(c.modelName) {
 			if strings.HasPrefix(input.Media.MIMEType, "audio/") {
 				return c.session.SendRealtimeInput(genai.LiveSendRealtimeInputParameters{
 					Audio: input.Media,
@@ -205,6 +229,12 @@ func (c *liveConnection) SendRealtime(input *genai.LiveRealtimeInput) error {
 	if input.ActivityEnd != nil {
 		return c.session.SendRealtimeInput(genai.LiveSendRealtimeInputParameters{
 			ActivityEnd: input.ActivityEnd,
+		})
+	}
+
+	if input.AudioStreamEnd {
+		return c.session.SendRealtimeInput(genai.LiveSendRealtimeInputParameters{
+			AudioStreamEnd: true,
 		})
 	}
 
@@ -254,20 +284,35 @@ func (c *liveConnection) process(ctx context.Context, in <-chan *genai.LiveServe
 			}
 		}
 
+		isGemini3xLive := googlellm.IsGemini3xLive(c.modelName)
+
 		var text string
+		var isThought bool
 		var toolCallParts []*genai.Part
+		var lastGroundingMetadata *genai.GroundingMetadata
+		var toolCallMetadata *genai.GroundingMetadata
 		for {
 			select {
 			case msg, ok := <-in:
 				if !ok {
+					if len(toolCallParts) > 0 {
+						send(&model.LLMResponse{
+							Content: &genai.Content{Role: "model", Parts: toolCallParts},
+						})
+					}
 					return
 				}
 
 				if msg.UsageMetadata != nil {
+					// Remap live token usage to GenerateContentResponse usage metadata.
+					// The live API names output tokens response_token_count /
+					// response_tokens_details.
 					if !send(&model.LLMResponse{
 						UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
 							CacheTokensDetails:         msg.UsageMetadata.CacheTokensDetails,
 							CachedContentTokenCount:    msg.UsageMetadata.CachedContentTokenCount,
+							CandidatesTokenCount:       msg.UsageMetadata.ResponseTokenCount,
+							CandidatesTokensDetails:    msg.UsageMetadata.ResponseTokensDetails,
 							PromptTokenCount:           msg.UsageMetadata.PromptTokenCount,
 							PromptTokensDetails:        msg.UsageMetadata.PromptTokensDetails,
 							ThoughtsTokenCount:         msg.UsageMetadata.ThoughtsTokenCount,
@@ -283,22 +328,93 @@ func (c *liveConnection) process(ctx context.Context, in <-chan *genai.LiveServe
 
 				if msg.ServerContent != nil {
 					content := msg.ServerContent.ModelTurn
-					if content != nil && len(content.Parts) > 0 {
-						resp := &model.LLMResponse{
-							Content:     content,
-							Interrupted: msg.ServerContent.Interrupted,
+					groundingMetadata := msg.ServerContent.GroundingMetadata
+					if groundingMetadata != nil {
+						lastGroundingMetadata = mergeGroundingMetadata(lastGroundingMetadata, groundingMetadata)
+					}
+
+					hasParts := content != nil && len(content.Parts) > 0
+
+					// Standalone grounding_metadata event (when content is empty)
+					if !hasParts && groundingMetadata != nil && !msg.ServerContent.TurnComplete {
+						if !send(&model.LLMResponse{
+							GroundingMetadata:  groundingMetadata,
+							Interrupted:        msg.ServerContent.Interrupted,
+							TurnCompleteReason: msg.ServerContent.TurnCompleteReason,
+						}) {
+							return
 						}
-						if content.Parts[0].Text != "" {
-							text += content.Parts[0].Text
-							resp.Partial = true
-						} else if text != "" && content.Parts[0].InlineData == nil {
-							if !send(c.buildFullTextResponse(text)) {
+					}
+
+					if hasParts {
+						resp := &model.LLMResponse{
+							Content:            content,
+							Interrupted:        msg.ServerContent.Interrupted,
+							TurnCompleteReason: msg.ServerContent.TurnCompleteReason,
+						}
+						// grounding_metadata is sent again at turn_complete, so avoid
+						// duplicating it here if turn_complete is true.
+						if !msg.ServerContent.TurnComplete && groundingMetadata != nil {
+							resp.GroundingMetadata = groundingMetadata
+						}
+						willFlush := msg.ServerContent.TurnComplete ||
+							msg.ServerContent.Interrupted ||
+							msg.ToolCall != nil
+						flushedParts := make(map[*genai.Part]bool)
+						var accumulatedParts []*genai.Part
+						markFlushed := func() {
+							for _, p := range accumulatedParts {
+								flushedParts[p] = true
+							}
+							accumulatedParts = nil
+						}
+						for _, part := range content.Parts {
+							if part == nil {
+								continue
+							}
+							if part.Text != "" {
+								currentIsThought := part.Thought
+								if text != "" && currentIsThought != isThought {
+									if !send(c.buildFullTextResponse(text, isThought, nil, false)) {
+										return
+									}
+									text = ""
+									isThought = false
+									markFlushed()
+								}
+
+								text += part.Text
+								isThought = currentIsThought
+								resp.Partial = true
+								accumulatedParts = append(accumulatedParts, part)
+							} else if text != "" && part.InlineData == nil {
+								// don't send the merged text event when receiving audio data
+								if !send(c.buildFullTextResponse(text, isThought, lastGroundingMetadata, false)) {
+									return
+								}
+								text = ""
+								isThought = false
+								lastGroundingMetadata = nil
+								markFlushed()
+							}
+						}
+						if willFlush {
+							markFlushed()
+						}
+						responseContent := content
+						if len(flushedParts) > 0 {
+							responseContent = &genai.Content{Role: content.Role}
+							for _, p := range content.Parts {
+								if !flushedParts[p] {
+									responseContent.Parts = append(responseContent.Parts, p)
+								}
+							}
+							resp.Content = responseContent
+						}
+						if len(responseContent.Parts) > 0 {
+							if !send(resp) {
 								return
 							}
-							text = ""
-						}
-						if !send(resp) {
-							return
 						}
 					}
 
@@ -306,32 +422,48 @@ func (c *liveConnection) process(ctx context.Context, in <-chan *genai.LiveServe
 					// generation_complete, causing transcription to appear after
 					// tool_call in the session log.
 					if msg.ServerContent.InputTranscription != nil {
-						if msg.ServerContent.InputTranscription.Text != "" {
-							c.inputTranscriptionText += msg.ServerContent.InputTranscription.Text
-							if !send(&model.LLMResponse{
-								InputTranscription: &genai.Transcription{
-									Text:     msg.ServerContent.InputTranscription.Text,
-									Finished: false,
-								},
-								Partial: true,
-							}) {
-								return
+						if isGemini3xLive {
+							// Gemini 3.x Live only sends a single final input
+							// transcription.
+							if msg.ServerContent.InputTranscription.Text != "" {
+								if !send(&model.LLMResponse{
+									InputTranscription: &genai.Transcription{
+										Text:     msg.ServerContent.InputTranscription.Text,
+										Finished: true,
+									},
+									Partial: false,
+								}) {
+									return
+								}
 							}
-						}
+						} else {
+							if msg.ServerContent.InputTranscription.Text != "" {
+								c.inputTranscriptionText += msg.ServerContent.InputTranscription.Text
+								if !send(&model.LLMResponse{
+									InputTranscription: &genai.Transcription{
+										Text:     msg.ServerContent.InputTranscription.Text,
+										Finished: false,
+									},
+									Partial: true,
+								}) {
+									return
+								}
+							}
 
-						// finished=True and partial transcription may happen in the same
-						// message.
-						if msg.ServerContent.InputTranscription.Finished {
-							if !send(&model.LLMResponse{
-								InputTranscription: &genai.Transcription{
-									Text:     c.inputTranscriptionText,
-									Finished: true,
-								},
-								Partial: false,
-							}) {
-								return
+							// finished=True and partial transcription may happen in the same
+							// message.
+							if msg.ServerContent.InputTranscription.Finished {
+								if !send(&model.LLMResponse{
+									InputTranscription: &genai.Transcription{
+										Text:     c.inputTranscriptionText,
+										Finished: true,
+									},
+									Partial: false,
+								}) {
+									return
+								}
+								c.inputTranscriptionText = ""
 							}
-							c.inputTranscriptionText = ""
 						}
 					}
 					if msg.ServerContent.OutputTranscription != nil {
@@ -400,25 +532,46 @@ func (c *liveConnection) process(ctx context.Context, in <-chan *genai.LiveServe
 					}
 					if msg.ServerContent.TurnComplete {
 						if text != "" {
-							if !send(c.buildFullTextResponse(text)) {
+							if !send(c.buildFullTextResponse(text, isThought, lastGroundingMetadata, msg.ServerContent.Interrupted)) {
 								return
 							}
 							text = ""
+							isThought = false
+							lastGroundingMetadata = nil
 						}
 						if len(toolCallParts) > 0 {
 							if !send(&model.LLMResponse{
-								Content: &genai.Content{Role: "model", Parts: toolCallParts},
+								Content:           &genai.Content{Role: "model", Parts: toolCallParts},
+								GroundingMetadata: toolCallMetadata,
 							}) {
 								return
 							}
 							toolCallParts = nil
+							if toolCallMetadata != nil {
+								lastGroundingMetadata = nil
+							}
+							toolCallMetadata = nil
+						}
+
+						// If lastGroundingMetadata was cleared in the full text response,
+						// avoid duplicating it here.
+						finalGroundingMetadata := groundingMetadata
+						if finalGroundingMetadata == nil {
+							finalGroundingMetadata = lastGroundingMetadata
+						}
+						if finalGroundingMetadata == nil && isGemini3xLive {
+							finalGroundingMetadata = &genai.GroundingMetadata{}
 						}
 						if !send(&model.LLMResponse{
-							TurnComplete: true,
-							Interrupted:  msg.ServerContent.Interrupted,
+							TurnComplete:       true,
+							Interrupted:        msg.ServerContent.Interrupted,
+							GroundingMetadata:  finalGroundingMetadata,
+							TurnCompleteReason: msg.ServerContent.TurnCompleteReason,
+							InteractionStatus:  msg.ServerContent.InteractionStatus,
 						}) {
 							return
 						}
+						lastGroundingMetadata = nil
 						continue
 					}
 					// in case of empty content or parts, we sill surface it
@@ -427,48 +580,67 @@ func (c *liveConnection) process(ctx context.Context, in <-chan *genai.LiveServe
 					// safety threshold is triggered
 					if msg.ServerContent.Interrupted {
 						if text != "" {
-							if !send(c.buildFullTextResponse(text)) {
+							if !send(c.buildFullTextResponse(text, isThought, lastGroundingMetadata, true)) {
 								return
 							}
 							text = ""
+							isThought = false
+							lastGroundingMetadata = nil
 						} else {
 							if !send(&model.LLMResponse{
-								Interrupted: msg.ServerContent.Interrupted,
+								Interrupted:       msg.ServerContent.Interrupted,
+								GroundingMetadata: lastGroundingMetadata,
 							}) {
 								return
 							}
+							lastGroundingMetadata = nil
 						}
 					}
 				}
 
 				if msg.ToolCall != nil {
 					if text != "" {
-						if !send(c.buildFullTextResponse(text)) {
+						if !send(c.buildFullTextResponse(text, isThought, lastGroundingMetadata, false)) {
 							return
 						}
 						text = ""
+						isThought = false
+						lastGroundingMetadata = nil
 					}
 					for _, fc := range msg.ToolCall.FunctionCalls {
 						toolCallParts = append(toolCallParts, &genai.Part{FunctionCall: fc})
 					}
-					// Gemini 3.1 does not emit turn_complete until it receives the
+					if !isGemini3xLive && toolCallMetadata == nil {
+						toolCallMetadata = lastGroundingMetadata
+					}
+					// Gemini 3.x Live does not emit turn_complete until it receives the
 					// tool response, so yield tool calls immediately to avoid
 					// deadlocking the conversation. Other models (e.g. 2.5-pro,
 					// native-audio) send turn_complete after tool calls, so buffer
 					// and merge them into a single response at turn_complete.
-					if isGemini31FlashLive(c.modelName) && len(toolCallParts) > 0 {
+					if isGemini3xLive && len(toolCallParts) > 0 {
 						if !send(&model.LLMResponse{
-							Content: &genai.Content{Role: "model", Parts: toolCallParts},
+							Content:           &genai.Content{Role: "model", Parts: toolCallParts},
+							GroundingMetadata: lastGroundingMetadata,
 						}) {
 							return
 						}
 						toolCallParts = nil
+						lastGroundingMetadata = nil
 					}
 				}
 
-				if msg.SessionResumptionUpdate != nil && msg.SessionResumptionUpdate.NewHandle != "" {
+				if msg.SessionResumptionUpdate != nil {
 					if !send(&model.LLMResponse{
 						LiveSessionResumptionUpdate: msg.SessionResumptionUpdate,
+					}) {
+						return
+					}
+				}
+
+				if msg.VoiceActivity != nil {
+					if !send(&model.LLMResponse{
+						VoiceActivity: msg.VoiceActivity,
 					}) {
 						return
 					}
@@ -490,15 +662,122 @@ func (c *liveConnection) process(ctx context.Context, in <-chan *genai.LiveServe
 	return out, errChan
 }
 
-func (c *liveConnection) buildFullTextResponse(text string) *model.LLMResponse {
+func (c *liveConnection) buildFullTextResponse(text string, isThought bool, groundingMetadata *genai.GroundingMetadata, interrupted bool) *model.LLMResponse {
+	part := genai.NewPartFromText(text)
+	if isThought {
+		part.Thought = true
+	}
 	return &model.LLMResponse{
 		Content: &genai.Content{
-			Role: "model",
-			Parts: []*genai.Part{
-				genai.NewPartFromText(text),
-			},
+			Role:  "model",
+			Parts: []*genai.Part{part},
 		},
+		GroundingMetadata: groundingMetadata,
+		Interrupted:       interrupted,
+		Partial:           false,
 	}
+}
+
+// mergeGroundingMetadata merges two GroundingMetadata instances, accumulating
+// list fields. Mirrors Python's GeminiLlmConnection._merge_grounding_metadata,
+// which works on the dumped (JSON) form of both values.
+func mergeGroundingMetadata(existing, newMetadata *genai.GroundingMetadata) *genai.GroundingMetadata {
+	if existing == nil {
+		return newMetadata
+	}
+	if newMetadata == nil {
+		return existing
+	}
+	existingData, err := groundingMetadataToMap(existing)
+	if err != nil {
+		return newMetadata
+	}
+	newData, err := groundingMetadataToMap(newMetadata)
+	if err != nil {
+		return existing
+	}
+
+	// Get offset from existing grounding chunks for shifting support indices
+	existingChunks, _ := existingData["groundingChunks"].([]any)
+	chunkOffset := len(existingChunks)
+
+	for key, val := range newData {
+		list, isList := val.([]any)
+		switch {
+		case isList && allStrings(list):
+			existingList, _ := existingData[key].([]any)
+			for _, item := range list {
+				if !containsString(existingList, item.(string)) {
+					existingList = append(existingList, item)
+				}
+			}
+			existingData[key] = existingList
+		case key == "groundingChunks":
+			chunks, _ := existingData["groundingChunks"].([]any)
+			existingData["groundingChunks"] = append(chunks, list...)
+		case key == "groundingSupports":
+			supports, _ := existingData["groundingSupports"].([]any)
+			for _, s := range list {
+				support, ok := s.(map[string]any)
+				if ok {
+					indices, _ := support["groundingChunkIndices"].([]any)
+					for i, idx := range indices {
+						n, isNumber := idx.(float64)
+						if isNumber {
+							indices[i] = n + float64(chunkOffset)
+						}
+					}
+				}
+				supports = append(supports, s)
+			}
+			existingData["groundingSupports"] = supports
+		default:
+			existingData[key] = val
+		}
+	}
+
+	b, err := json.Marshal(existingData)
+	if err != nil {
+		return newMetadata
+	}
+	merged := &genai.GroundingMetadata{}
+	err = json.Unmarshal(b, merged)
+	if err != nil {
+		return newMetadata
+	}
+	return merged
+}
+
+func groundingMetadataToMap(m *genai.GroundingMetadata) (map[string]any, error) {
+	b, err := json.Marshal(m)
+	if err != nil {
+		return nil, err
+	}
+	data := map[string]any{}
+	err = json.Unmarshal(b, &data)
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+func allStrings(list []any) bool {
+	for _, v := range list {
+		_, ok := v.(string)
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func containsString(list []any, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *liveConnection) Receive(ctx context.Context) (<-chan *model.LLMResponse, <-chan error) {
